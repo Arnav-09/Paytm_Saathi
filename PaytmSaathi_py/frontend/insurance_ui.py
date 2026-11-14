@@ -1,0 +1,435 @@
+"""Insurance journey: my policy (coverage at a glance + waiting countdown), Ask Saathi,
+Claim Pre-Flight (estimate, room what-if, documents), explain a clause."""
+
+from __future__ import annotations
+
+import re
+import tempfile
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+
+from ai_engine import (
+    ClaimContext,
+    HospitalBill,
+    accounts,
+    ask_policy_question,
+    estimate_claim_payout,
+    explain_clause_text,
+    explain_policy_clause,
+    extract_hospital_bill,
+    get_claim_relevant_clauses,
+    get_policy_details,
+    process_policy,
+)
+from ai_engine.bill_extractor import CATEGORIES
+from ai_engine.policy_insights import (
+    claim_documents,
+    coverage_at_a_glance,
+    room_rent_what_if,
+    waiting_period_timeline,
+)
+from ai_engine.schemas import BillLineItem
+from frontend.common import (
+    L, current_policy, demo_mode, lang, my_policies, need_policy, pick, policy_key,
+    policy_label, run, safe_name, uid,
+)
+from frontend.theme import alert, empty_state, esc, inr, note, page_header, pill, steps
+
+CATEGORY_LABELS = {
+    "room_rent": ("Room rent", "कमरे का किराया"), "icu_rent": ("ICU", "आईसीयू"),
+    "doctor_fees": ("Doctor fees", "डॉक्टर फीस"), "surgery": ("Surgery / OT", "सर्जरी / ओटी"),
+    "nursing": ("Nursing", "नर्सिंग"), "medicines": ("Medicines", "दवाइयाँ"),
+    "investigations": ("Tests", "जाँचें"), "consumables": ("Consumables", "उपभोग्य सामग्री"),
+    "non_payable": ("Non-payable", "भुगतान योग्य नहीं"), "other": ("Other", "अन्य"),
+}
+
+
+def _policy_start(pid: str) -> date | None:
+    return st.session_state.get(f"pstart_{pid}")
+
+
+# ---------------------------------------------------------------------------
+# My policy
+# ---------------------------------------------------------------------------
+def tab_policy():
+    mine = my_policies()
+    left, right = st.columns([2, 1], vertical_alignment="bottom")
+    if mine:
+        idx = mine.index(current_policy()) if current_policy() in mine else 0
+        st.session_state["policy_id"] = left.selectbox(
+            L("Your policies", "आपकी पॉलिसी"), mine, index=idx, format_func=policy_label, key="pol_pick")
+    with right.popover(L("➕ Upload a policy", "➕ पॉलिसी अपलोड करें"), width="stretch"):
+        _upload_policy()
+    pid = current_policy()
+    if not pid:
+        empty_state("📄", L("Upload your health policy to begin", "शुरू करने के लिए अपनी हेल्थ पॉलिसी अपलोड करें"),
+                    L("PDF from your insurer's email or app. Scanned copies work too. We'll show what's covered, what isn't, and the fine print that affects claims.",
+                      "बीमा कंपनी के ईमेल या ऐप से मिली PDF। स्कैन कॉपी भी चलेगी। हम बताएँगे क्या कवर है, क्या नहीं, और क्लेम पर असर डालने वाली बारीक शर्तें।"))
+        return
+    details = run(get_policy_details, pid)
+    if not details:
+        return
+    st.markdown(f"### {esc(details.policy_name or policy_label(pid))}")
+    st.caption(details.insurer_name or L("Insurer name not found in the document", "दस्तावेज़ में बीमा कंपनी का नाम नहीं मिला"))
+    m = st.columns(4)
+    m[0].metric(L("Sum insured", "बीमित राशि"), inr(details.sum_insured.value) if details.sum_insured else "—")
+    m[1].metric(L("Room rent limit", "कमरे के किराए की सीमा"), inr(details.room_rent_limit.value) if details.room_rent_limit else L("No cap found", "सीमा नहीं मिली"))
+    m[2].metric(L("Co-pay", "सह-भुगतान"), f"{details.copay_percentage:g}%" if details.copay_percentage is not None else L("None found", "नहीं मिला"))
+    m[3].metric(L("Exclusions", "अपवर्जन"), len(details.exclusions))
+
+    st.markdown(f"#### {L('Coverage at a glance', 'एक नज़र में कवरेज')}")
+    g = coverage_at_a_glance(details)
+    cols = st.columns(3)
+    for col, title, items, cls, empty in [
+        (cols[0], L("✅ Covered", "✅ कवर है"), g.covered, "ok", L("Nothing extracted yet", "अभी कुछ नहीं मिला")),
+        (cols[1], L("❌ Not covered", "❌ कवर नहीं"), g.not_covered, "bad", L("No exclusions extracted", "कोई अपवर्जन नहीं मिला")),
+        (cols[2], L("⚠️ Watch-outs", "⚠️ ध्यान दें"), g.watch_outs, "warn", L("No limits extracted", "कोई सीमा नहीं मिली")),
+    ]:
+        rows = "".join(
+            f'<div class="item">{esc(L(i.text, i.text_hi))}'
+            + (f'<div class="ref">{esc(L("Clause", "क्लॉज़"))} {esc(i.clause or "-")} · {esc(L("page", "पेज"))} {i.page}</div>' if i.page else "")
+            + "</div>" for i in items) or f'<div class="item" style="color:#5B6B82">{esc(empty)}</div>'
+        col.markdown(f'<div class="ps-glance ps-g-{cls}"><h5>{title}</h5>{rows}</div>', unsafe_allow_html=True)
+    if g.unknown:
+        st.caption(L("Not found in this document: ", "इस दस्तावेज़ में नहीं मिला: ") + ", ".join(g.unknown))
+
+    st.markdown(f"#### {L('Waiting-period countdown', 'प्रतीक्षा अवधि काउंटडाउन')}")
+    start = st.date_input(L("When did this policy start?", "यह पॉलिसी कब शुरू हुई?"), value=_policy_start(pid),
+                          max_value=date.today(), key=f"pstart_in_{pid}", format="DD/MM/YYYY")
+    if start:
+        st.session_state[f"pstart_{pid}"] = start
+        rows = run(waiting_period_timeline, details, start)
+        if rows:
+            for r in rows:
+                c1, c2 = st.columns([3, 2], vertical_alignment="center")
+                c1.progress(r.progress, text=f"**{r.condition}** · {r.duration_days} {L('days', 'दिन')}")
+                c2.markdown(pill(L("Completed", "पूरी हुई"), "ok") if r.completed else
+                            pill(L(f"Ends {r.ends_on} · {r.days_left} days left", f"{r.ends_on} को खत्म · {r.days_left} दिन बाकी"), "warn"),
+                            unsafe_allow_html=True)
+        elif rows is not None:
+            st.caption(L("No waiting periods with a day count were found in this policy.", "इस पॉलिसी में दिनों वाली कोई प्रतीक्षा अवधि नहीं मिली।"))
+    else:
+        st.caption(L("Add the start date to see exactly when each waiting period ends.", "हर प्रतीक्षा अवधि कब खत्म होगी, यह देखने के लिए शुरू होने की तारीख डालें।"))
+    with st.expander(L("All extracted details (JSON)", "निकाली गई पूरी जानकारी (JSON)")):
+        st.json(details.model_dump())
+
+
+def _upload_policy():
+    up = st.file_uploader(L("Policy PDF (text or scanned)", "पॉलिसी PDF (टेक्स्ट या स्कैन)"), type=["pdf"], key="pol_up")
+    default = re.sub(r"[^a-z0-9_]+", "_", Path(up.name).stem.lower()).strip("_")[:30] if up else ""
+    name = st.text_input(L("Give it a short name", "इसे एक छोटा नाम दें"), value=default, key=f"pol_name_{default}")
+    if st.button(L("Read my policy", "मेरी पॉलिसी पढ़ें"), type="primary", disabled=not (up and name.strip()), key="pol_go"):
+        pid = policy_key(name.strip())
+        with st.spinner(L("Reading your policy - the first time can take a minute…", "आपकी पॉलिसी पढ़ी जा रही है - पहली बार थोड़ा समय लग सकता है…")):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / safe_name(up.name)
+                path.write_bytes(up.getvalue())
+                details = run(process_policy, str(path), pid)
+        if details:
+            accounts.link_policy(uid(), pid)
+            st.session_state["policy_id"] = pid
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Ask Saathi
+# ---------------------------------------------------------------------------
+FOLLOW_UPS = [
+    (("room", "icu", "rent"), [("Does the limit apply to ICU too?", "क्या यह सीमा आईसीयू पर भी लागू है?"),
+                               ("What happens if I choose a costlier room?", "महँगा कमरा लेने पर क्या होगा?")]),
+    (("wait", "pre-existing", "ped"), [("Are accidents covered from day one?", "क्या दुर्घटना पहले दिन से कवर है?"),
+                                        ("Which diseases have a waiting period?", "किन बीमारियों पर प्रतीक्षा अवधि है?")]),
+    (("claim", "cashless", "reimburse"), [("Which documents do I need for a claim?", "क्लेम के लिए कौन से दस्तावेज़ चाहिए?"),
+                                          ("How long do I have to submit a claim?", "क्लेम जमा करने की समय-सीमा क्या है?")]),
+]
+DEFAULT_SUGGESTIONS = [("What is my room rent limit?", "मेरे कमरे के किराए की सीमा क्या है?"),
+                       ("What is not covered?", "क्या कवर नहीं है?"),
+                       ("What is the waiting period for pre-existing diseases?", "पहले से मौजूद बीमारियों की प्रतीक्षा अवधि क्या है?")]
+
+
+def _suggestions(last_question: str | None):
+    if last_question:
+        q = last_question.lower()
+        for keys, items in FOLLOW_UPS:
+            if any(k in q for k in keys):
+                return items
+        return [("What is not covered?", "क्या कवर नहीं है?"), ("How do I make a cashless claim?", "कैशलेस क्लेम कैसे करें?")]
+    return DEFAULT_SUGGESTIONS
+
+
+def tab_ask():
+    if not need_policy():
+        return
+    pid = current_policy()
+    if demo_mode():
+        note(L("Demo mode: connect a free AI key (see README) for real answers. Without it, Saathi honestly says it can't answer.",
+               "डेमो मोड: असली उत्तर के लिए मुफ़्त एआई कुंजी जोड़ें (README देखें)। इसके बिना साथी ईमानदारी से बताएगा कि वह जवाब नहीं दे सकता।"))
+    history = st.session_state.setdefault("chat", {}).setdefault(pid, [])
+    for turn in history:
+        with st.chat_message(turn["role"], avatar="🧑" if turn["role"] == "user" else "🛡️"):
+            st.markdown(turn["content"], unsafe_allow_html=True)
+            for s in turn.get("sources") or []:
+                head = f"📄 {L('Page', 'पेज')} {s.page_number}" + (f" · {L('Clause', 'क्लॉज़')} {s.clause_reference}" if s.clause_reference else "")
+                st.markdown(f'<div class="ps-note"><b>{esc(head)}</b><br>{esc(s.quoted_text)}</div>', unsafe_allow_html=True)
+
+    last_q = next((t["content"] for t in reversed(history) if t["role"] == "user"), None)
+    clicked = None
+    chips = _suggestions(last_q)
+    cols = st.columns(len(chips) + (1 if history else 0))
+    for i, (col, (en, hi)) in enumerate(zip(cols, chips)):
+        if col.button(L(en, hi), key=f"sg_{len(history)}_{i}", width="stretch"):
+            clicked = L(en, hi)
+    if history and cols[-1].button(L("🪄 Explain simpler", "🪄 और आसान बताइए"), key=f"simpler_{len(history)}", width="stretch"):
+        clicked = L("Explain your previous answer in simpler words with a small example.",
+                    "अपने पिछले उत्तर को और आसान शब्दों में एक छोटे उदाहरण के साथ समझाइए।")
+
+    question = st.chat_input(L("Ask anything about your policy…", "अपनी पॉलिसी के बारे में कुछ भी पूछें…")) or clicked
+    if question:
+        history.append({"role": "user", "content": esc(question)})
+        with st.spinner(L("Reading your policy…", "आपकी पॉलिसी पढ़ रहे हैं…")):
+            resp = run(ask_policy_question, pid, question, f"{pid}-ui", lang())
+        if resp:
+            kind, label = {"high": ("ok", L("High confidence", "उच्च भरोसा")),
+                           "medium": ("warn", L("Medium confidence", "मध्यम भरोसा")),
+                           "low": ("bad", L("Low confidence", "कम भरोसा"))}[resp.confidence.value]
+            history.append({"role": "assistant", "sources": resp.sources,
+                            "content": esc(resp.answer).replace("\n", "<br>") + "<br><br>" + pill(label, kind)})
+        st.rerun()
+    if history and st.button(L("Clear chat", "चैट साफ़ करें"), key="chat_clear"):
+        st.session_state["chat"][pid] = []
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Claim Pre-Flight
+# ---------------------------------------------------------------------------
+def _bill_to_df(bill: HospitalBill) -> pd.DataFrame:
+    rows = [{"description": i.description, "category": i.category, "quantity": i.quantity,
+             "amount": i.amount, "is_payable": i.is_payable} for i in bill.line_items]
+    return pd.DataFrame(rows or [{"description": "", "category": "other", "quantity": None,
+                                  "amount": 0.0, "is_payable": True}])
+
+
+def _set_bill(bill: HospitalBill) -> None:
+    st.session_state["bill"] = bill
+    st.session_state.pop("estimate", None)
+    st.session_state["bill_rev"] = st.session_state.get("bill_rev", 0) + 1
+
+
+def _items_from(edited: pd.DataFrame) -> list[BillLineItem]:
+    items = []
+    for row in edited.to_dict("records"):
+        desc = str(row.get("description") or "").strip()
+        if not desc:
+            continue
+        qty, amount = row.get("quantity"), row.get("amount")
+        items.append(BillLineItem(
+            description=desc, category=row.get("category") or "other",
+            quantity=None if qty is None or pd.isna(qty) else float(qty),
+            amount=0.0 if amount is None or pd.isna(amount) else float(amount),
+            is_payable=bool(row.get("is_payable", True))))
+    return items
+
+
+def tab_claim():
+    if not need_policy():
+        return
+    pid = current_policy()
+    bill: HospitalBill | None = st.session_state.get("bill")
+    stage = 0 if bill is None else (2 if st.session_state.get("estimate") else 1)
+    steps([L("Add hospital bill", "अस्पताल का बिल जोड़ें"), L("Check the details", "विवरण जाँचें"),
+           L("See your payout", "अपना भुगतान देखें")], stage)
+
+    c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+    up = c1.file_uploader(L("Hospital bill or estimate (PDF, scan or photo)", "अस्पताल का बिल या एस्टिमेट (PDF, स्कैन या फोटो)"),
+                          type=["pdf", "png", "jpg", "jpeg"], key="bill_up")
+    if c2.button(L("Read bill", "बिल पढ़ें"), type="primary", disabled=up is None, key="bill_go", width="stretch"):
+        with st.spinner(L("Reading bill…", "बिल पढ़ा जा रहा है…")):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / safe_name(up.name)
+                path.write_bytes(up.getvalue())
+                new_bill = run(extract_hospital_bill, str(path))
+        if new_bill:
+            _set_bill(new_bill)
+            st.rerun()
+    if c2.button(L("Enter manually", "हाथ से भरें"), key="bill_manual", width="stretch"):
+        _set_bill(HospitalBill(extraction_method="manual"))
+        st.rerun()
+    st.caption(L("Tip: ask the hospital for a cost estimate before admission and check it here - you'll know your out-of-pocket amount in advance.",
+                 "सुझाव: भर्ती से पहले अस्पताल से खर्च का एस्टिमेट लें और यहाँ जाँचें - आपको पहले से पता चलेगा कि अपनी जेब से कितना देना होगा।"))
+    if bill is None:
+        return
+    for w in bill.warnings:
+        st.warning(w)
+
+    rev = st.session_state.get("bill_rev", 0)
+    st.markdown(f"#### {L('Check the bill', 'बिल जाँचें')}")
+    edited = st.data_editor(
+        _bill_to_df(bill), num_rows="dynamic", width="stretch", key=f"bill_ed_{rev}",
+        column_config={
+            "description": st.column_config.TextColumn(L("Item", "आइटम"), width="large"),
+            "category": st.column_config.SelectboxColumn(L("Category", "श्रेणी"), options=CATEGORIES,
+                                                         format_func=lambda c: CATEGORY_LABELS.get(c, (c, c))[lang() == "hi"]),
+            "quantity": st.column_config.NumberColumn(L("Qty / days", "मात्रा/दिन"), min_value=0),
+            "amount": st.column_config.NumberColumn(L("Amount (₹)", "राशि (₹)"), min_value=0, format="%.2f"),
+            "is_payable": st.column_config.CheckboxColumn(L("Payable?", "भुगतान योग्य?")),
+        })
+    a, b, c = st.columns(3)
+    days = a.number_input(L("Days in hospital", "अस्पताल में दिन"), min_value=0, value=int(bill.days_of_stay or 0), key=f"days_{rev}")
+    diagnosis = b.text_input(L("Diagnosis", "बीमारी"), value=bill.diagnosis or "", key=f"dx_{rev}")
+    procedure = c.text_input(L("Procedure / surgery", "प्रक्रिया / सर्जरी"), value=bill.procedure or "", key=f"proc_{rev}")
+    d, e, f = st.columns(3)
+    start = _policy_start(pid)
+    if start:
+        d.markdown(f"**{L('Policy started', 'पॉलिसी शुरू')}**  \n{start:%d %b %Y} · {(date.today() - start).days} {L('days ago', 'दिन पहले')}")
+        age_days = (date.today() - start).days
+    else:
+        age_days = d.number_input(L("Policy age (days)", "पॉलिसी की उम्र (दिन)"), min_value=0, value=0, key=f"age_{rev}",
+                                  help=L("0 = unknown. Tip: add the start date in 'My policy'.", "0 = पता नहीं। सुझाव: 'मेरी पॉलिसी' में शुरू होने की तारीख डालें।"))
+    prior = e.number_input(L("Already claimed this year (₹)", "इस साल पहले से क्लेम (₹)"), min_value=0.0, value=0.0, key=f"prior_{rev}")
+    ped = f.checkbox(L("Condition existed before the policy", "बीमारी पॉलिसी से पहले की है"), key=f"ped_{rev}")
+
+    if st.button(L("Calculate my payout", "मेरा भुगतान निकालें"), type="primary", key=f"calc_{rev}"):
+        items = _items_from(edited)
+        final = bill.model_copy(update={
+            "line_items": items, "days_of_stay": int(days) or None, "diagnosis": diagnosis or None,
+            "procedure": procedure or None, "computed_total": round(sum(i.amount for i in items), 2)})
+        ctx = ClaimContext(policy_age_days=int(age_days) or None, previously_claimed=float(prior), is_pre_existing=ped)
+        with st.spinner(L("Calculating…", "गणना हो रही है…")):
+            est = run(estimate_claim_payout, pid, final, ctx)
+        if est:
+            st.session_state["estimate"] = (est, final, ctx)
+            st.rerun()
+    result = st.session_state.get("estimate")
+    if result:
+        render_estimate(pid, *result)
+
+
+def render_estimate(pid, est, bill: HospitalBill, ctx: ClaimContext):
+    st.divider()
+    kind, label = {"likely_payable": ("ok", L("Likely payable", "भुगतान की संभावना")),
+                   "needs_review": ("warn", L("Needs review", "समीक्षा ज़रूरी")),
+                   "likely_excluded": ("bad", L("Likely not payable", "भुगतान की संभावना कम"))}[est.eligibility_status]
+    st.markdown(f"#### {L('Your estimate', 'आपका अनुमान')} &nbsp; {pill(label, kind)}", unsafe_allow_html=True)
+    m = st.columns(3)
+    m[0].metric(L("Hospital bill", "अस्पताल का बिल"), inr(est.bill_total))
+    m[1].metric(L("Insurer may pay", "बीमा कंपनी दे सकती है"), inr(est.estimated_payout))
+    m[2].metric(L("You may pay", "आपको देना पड़ सकता है"), inr(est.patient_pays))
+    if est.bill_total:
+        st.progress(min(est.estimated_payout / est.bill_total, 1.0),
+                    text=L(f"Insurance covers about {est.estimated_payout / est.bill_total:.0%} of this bill",
+                           f"बीमा इस बिल का लगभग {est.estimated_payout / est.bill_total:.0%} कवर करता है"))
+    if est.eligibility_status != "likely_payable" and est.payout_if_covered:
+        st.caption(L(f"If this claim is covered, the estimate is {inr(est.payout_if_covered)}.",
+                     f"अगर यह क्लेम कवर होता है तो अनुमान {inr(est.payout_if_covered)} है।"))
+    for text in pick(est.flags, est.flags_hi):
+        alert(text)
+
+    left, right = st.columns([1.3, 1])
+    with left:
+        st.markdown(f"**{L('How we worked it out', 'हिसाब कैसे बना')}**")
+        st.dataframe(pd.DataFrame([{
+            L("Step", "चरण"): (s.description_hi if lang() == "hi" and s.description_hi else s.description),
+            L("Deducted", "कटौती"): inr(s.deduction) if s.deduction else "—",
+            L("Running total", "बची राशि"): inr(s.amount_after),
+            L("Clause", "क्लॉज़"): ((s.clause_reference or "") + (f" (p.{s.source_page})" if s.source_page else "")).strip() or "—",
+        } for s in est.steps]), hide_index=True, width="stretch")
+    with right:
+        st.markdown(f"**{L('What if you chose a different room?', 'अगर आप दूसरा कमरा चुनते तो?')}**")
+        details = get_policy_details(pid)
+        options = None
+        if details.room_rent_limit and any(i.category == "room_rent" for i in bill.line_items):
+            try:
+                options = room_rent_what_if(details, bill, ctx)
+            except Exception:
+                options = None
+        if options:
+            labels = {"Your room": L("Your room", "आपका कमरा"), "Within limit": L("Within limit", "सीमा के भीतर"),
+                      "Costlier room": L("Costlier room", "महँगा कमरा")}
+            df = pd.DataFrame([{L("Room / day", "कमरा/दिन"): inr(o.room_rent_per_day), L("Type", "प्रकार"): labels[o.label],
+                                L("Insurer pays", "बीमा देगा"): inr(o.estimated_payout), L("You pay", "आप देंगे"): inr(o.you_pay)}
+                               for o in options])
+            st.dataframe(df, hide_index=True, width="stretch")
+            mine = next((o for o in options if o.label == "Your room"), None)
+            best = min(options, key=lambda o: o.you_pay)
+            if mine and best.you_pay < mine.you_pay:
+                st.success(L(f"Choosing a {inr(best.room_rent_per_day)}/day room would save you about {inr(mine.you_pay - best.you_pay)}.",
+                             f"{inr(best.room_rent_per_day)}/दिन का कमरा लेने पर आपके लगभग {inr(mine.you_pay - best.you_pay)} बचेंगे।"))
+        else:
+            st.caption(L("Needs a room-rent limit in the policy and a room charge on the bill.",
+                         "इसके लिए पॉलिसी में रूम-रेंट सीमा और बिल में कमरे का शुल्क होना चाहिए।"))
+
+    with st.expander(L("📋 Documents you'll need for the claim", "📋 क्लेम के लिए ज़रूरी दस्तावेज़"), expanded=True):
+        mode = st.radio(L("Claim type", "क्लेम का प्रकार"), ["cashless", "reimbursement"], horizontal=True, key="claim_mode",
+                        format_func=lambda m: L("Cashless (network hospital)", "कैशलेस (नेटवर्क अस्पताल)") if m == "cashless"
+                        else L("Reimbursement (pay first, claim later)", "प्रतिपूर्ति (पहले भुगतान, बाद में क्लेम)"))
+        for i, doc in enumerate(claim_documents(mode, bill)):
+            st.checkbox(doc["hi" if lang() == "hi" else "en"], key=f"cdoc_{mode}_{i}")
+    if est.missing_information:
+        note(L("Could not check: ", "जाँच नहीं हो सकी: ") + ", ".join(est.missing_information))
+    with st.expander(L("Assumptions and policy clauses", "मान्यताएँ और पॉलिसी क्लॉज़")):
+        for a in est.assumptions:
+            st.markdown(f"- {a}")
+        rel = run(get_claim_relevant_clauses, pid, {"diagnosis": bill.diagnosis, "procedure": bill.procedure})
+        if rel and rel.clauses:
+            for cl in rel.clauses[:5]:
+                st.markdown(f"**{cl.condition_type.replace('_', ' ').title()}** · {L('Page', 'पेज')} {cl.page_number}\n\n> {cl.quoted_text}")
+    st.download_button(L("⬇️ Download estimate summary", "⬇️ अनुमान सारांश डाउनलोड करें"), data=_summary_text(pid, est, bill),
+                       file_name=f"claim_estimate_{date.today():%Y%m%d}.txt", mime="text/plain")
+    st.caption(est.disclaimer)
+
+
+def _summary_text(pid, est, bill) -> str:
+    lines = [f"Paytm Saathi - Claim Pre-Flight estimate ({date.today():%d %b %Y})",
+             f"Policy: {policy_label(pid)}", f"Hospital: {bill.hospital_name or '-'}",
+             f"Diagnosis/procedure: {bill.diagnosis or '-'} / {bill.procedure or '-'}", "",
+             f"Bill total:       Rs. {est.bill_total:,.2f}", f"Insurer may pay:  Rs. {est.estimated_payout:,.2f}",
+             f"You may pay:      Rs. {est.patient_pays:,.2f}", f"Status: {est.eligibility_status}", "", "Steps:"]
+    lines += [f"- {s.description}: -Rs. {s.deduction:,.2f} -> Rs. {s.amount_after:,.2f}" for s in est.steps]
+    if est.flags:
+        lines += ["", "Flags:"] + [f"- {f}" for f in est.flags]
+    lines += ["", est.disclaimer]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Explain a clause
+# ---------------------------------------------------------------------------
+def tab_explain():
+    mode = st.radio(L("How do you want to find the clause?", "क्लॉज़ कैसे ढूँढना है?"), ["paste", "number"], horizontal=True,
+                    key="explain_mode", format_func=lambda m: L("Paste the wording", "शब्द पेस्ट करें") if m == "paste"
+                    else L("By clause number", "क्लॉज़ नंबर से"))
+    if mode == "number":
+        if not need_policy():
+            return
+        ref = st.text_input(L("Clause number (for example 4.2)", "क्लॉज़ नंबर (जैसे 4.2)"), key="clause_ref")
+        go = st.button(L("Explain", "समझाएँ"), type="primary", disabled=not ref.strip(), key="clause_go")
+        res = run(explain_policy_clause, current_policy(), ref, lang()) if go else None
+    else:
+        text = st.text_area(L("Paste any confusing line from your policy", "पॉलिसी की कोई उलझन वाली लाइन पेस्ट करें"), height=130, key="clause_text",
+                            placeholder=L("e.g. Expenses related to the treatment of cataract are payable after 24 months of continuous coverage…",
+                                          "जैसे: मोतियाबिंद के इलाज से जुड़े खर्च 24 महीने के लगातार कवरेज के बाद देय हैं…"))
+        go = st.button(L("Explain in simple words", "आसान शब्दों में समझाएँ"), type="primary", disabled=len(text.strip()) < 20, key="clause_text_go")
+        res = run(explain_clause_text, text, lang()) if go else None
+    if res:
+        left, right = st.columns(2)
+        left.markdown(f"**{L('Original wording', 'मूल शब्द')}**" + (f" · {L('page', 'पेज')} {res.page_number}" if res.page_number else ""))
+        left.markdown(f'<div class="ps-msg">{esc(res.original_clause)}</div>', unsafe_allow_html=True)
+        right.markdown(f"**{L('In simple words', 'आसान शब्दों में')}**")
+        right.markdown(f'<div class="ps-note">{esc(res.simple_explanation)}</div>', unsafe_allow_html=True)
+        if demo_mode():
+            st.caption(L("Connect a free AI key for real explanations.", "असली व्याख्या के लिए मुफ़्त एआई कुंजी जोड़ें।"))
+
+
+def render():
+    page_header(L("Health insurance", "हेल्थ बीमा"),
+                L("Understand your cover, check claims before you pay, and decode the fine print.",
+                  "अपना कवर समझें, भुगतान से पहले क्लेम जाँचें और बारीक शर्तें समझें।"))
+    tabs = st.tabs([L("📄 My policy", "📄 मेरी पॉलिसी"), L("💬 Ask Saathi", "💬 साथी से पूछें"),
+                    L("🧾 Claim Pre-Flight", "🧾 क्लेम प्री-फ्लाइट"), L("🔍 Explain a clause", "🔍 क्लॉज़ समझें")])
+    for tab, fn in zip(tabs, (tab_policy, tab_ask, tab_claim, tab_explain)):
+        with tab:
+            fn()

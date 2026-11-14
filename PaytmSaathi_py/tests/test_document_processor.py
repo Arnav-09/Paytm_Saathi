@@ -75,10 +75,13 @@ def test_zero_byte_pdf_rejected(tmp_path):
 
 
 def test_pdf_with_no_pages_raises(tmp_path):
+    # PyMuPDF refuses to *save* a zero-page document, so write a minimal one by hand.
     path = tmp_path / "no_pages.pdf"
-    doc = fitz.open()
-    doc.save(str(path))
-    doc.close()
+    path.write_bytes(
+        b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj\n"
+        b"trailer << /Root 1 0 R >>\n%%EOF\n"
+    )
     with pytest.raises(EmptyPDFError):
         extract_pdf_pages(path)
 

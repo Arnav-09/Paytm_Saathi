@@ -304,10 +304,13 @@ Tests mock the LLM provider so no API key or network is needed. They cover:
 | LLM provider: mock | ✅ Ready (default) |
 | LLM provider: OpenAI-compatible API | ✅ Implemented — set `OPENAI_API_KEY` in `.env` |
 | LLM provider: Ollama | ✅ Implemented — run Ollama locally |
-| FastAPI integration | ⬜ Wrapper endpoints to be written by backend team |
-| Streamlit UI | ⬜ To be written by frontend team |
-| OCR for scanned PDFs | ⬜ Integration point (engine reports OCR required) |
-| Hospital bill extraction / payout calculation | ⬜ Owned by other team member |
+| FastAPI backend (`backend/main.py`) | ✅ Implemented |
+| Streamlit UI (`app.py`, `frontend/`) | ✅ Implemented (Paytm-style theme, English + हिन्दी) |
+| OCR for scanned policies and photographed bills | ✅ Implemented (needs `rapidocr-onnxruntime`) |
+| Hospital bill extraction + payout estimate | ✅ Implemented (`bill_extractor.py`, `payout_calculator.py`) |
+| Hindi support | ✅ Implemented (`language.py`) |
+| Lending journeys | ✅ Implemented (`lending.py`) |
+| Fintech journeys (KYC, disputes, scam check) | ✅ Implemented (`fintech.py`) |
 
 ## Security notes
 
@@ -346,3 +349,62 @@ result = get_claim_relevant_clauses(
 
 No financial calculations are performed by this module — only rule retrieval
 and structuring.
+
+---
+
+## Full app: Insurance + Lending + Fintech
+
+```
+ai_engine/   engine (insurance RAG + bills + payout, language, lending, fintech, ocr)
+backend/     FastAPI REST API          ->  uvicorn backend.main:app --reload   (docs at /docs)
+frontend/    Streamlit pages + theme   ->  streamlit run app.py
+```
+
+### Run it
+
+```bash
+pip install -r requirements.txt
+copy .env.example .env            # then paste your free GROQ_API_KEY (see below)
+streamlit run app.py              # UI on http://localhost:8501 - register, then log in
+uvicorn backend.main:app --reload # API on http://localhost:8000/docs
+pytest -q
+```
+
+### Connect a free AI model (Groq)
+
+1. Sign up at https://console.groq.com (free, no credit card) and create an API key.
+2. In `.env` set `LLM_PROVIDER=groq` and `GROQ_API_KEY=<your key>`.
+3. Restart the app. The chip at the top changes from "Demo mode" to "AI: Groq · llama-3.3-70b-versatile".
+
+Free tiers are rate-limited; the app retries briefly and then shows "busy, try again in a minute".
+Google Gemini also has a free tier: `LLM_PROVIDER=gemini` and `GEMINI_API_KEY`.
+Without a key the app still runs in demo mode: calculators, checks and dispute help work fully;
+policy Q&A and explanations say honestly that they cannot answer.
+
+### Accounts
+
+Registration asks only for basic details: full name, mobile, optional email, password and
+preferred language. **No KYC at sign-up.** Users are stored in `data/users.json` with
+PBKDF2-hashed passwords. 5 wrong passwords lock the account for 15 minutes. Each user sees only their
+own policies and dispute tickets. The API offers `/auth/register` and `/auth/login`, which return a
+token signed with `APP_SECRET`.
+
+### What each journey does
+
+| Journey | Features |
+|---|---|
+| **Insurance** | Upload policy (text or scanned) · **Coverage at a glance** (covered / not covered / watch-outs with clause and page) · **waiting-period countdown** from the policy start date · Ask Saathi with cited sources, follow-up chips and "explain simpler" · explain a clause by number **or pasted text** · **Claim Pre-Flight**: bill (PDF/scan/photo) → editable line items → step-by-step payout, **room-choice what-if** (how much a room within the limit saves), cashless/reimbursement **document checklist**, downloadable summary |
+| **Loans** | EMI calculator · **prepayment planner** (interest and years saved, balance chart) · eligibility (illustrative rules) with **"what would change the answer"** levers · offer comparison with a **true-cost chart** and a warning when the lowest EMI isn't the cheapest · document checklist with progress · agreement explainer and glossary |
+| **Payments & KYC** | Payment problem helper with **escalation dates**, a **ready-to-send complaint** (app / bank nodal officer / RBI Ombudsman) and **My tickets** · scam check that **highlights the risky words** · KYC readiness stepper (format checks only, masked, nothing stored) |
+
+### Design rules kept throughout
+
+- **Money maths is plain Python.** The LLM never calculates payouts, EMIs or eligibility.
+- **Estimates, not promises.** Every result carries its assumptions and a disclaimer.
+- **Hindi is safe.** Translations are accepted only if every number and `[Source N]` citation survives unchanged; otherwise the English text is shown. The mock LLM never fakes a translation.
+- **Nothing invented.** Missing policy values stay empty and are listed as "could not check".
+- **Lending rules and rates are illustrative defaults** (`LENDING_RULES` in `lending.py`), not any lender's policy. KYC limits and RBI timelines in `fintech.py` are indicative; confirm with the provider.
+
+### OCR
+
+`pip install rapidocr-onnxruntime` enables OCR for scanned policy PDFs and bill photos (English and digits). Hindi OCR needs Tesseract with the `hin` pack and `OCR_LANGS=eng+hin`.
