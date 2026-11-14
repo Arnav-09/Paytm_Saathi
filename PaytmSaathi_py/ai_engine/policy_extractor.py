@@ -8,6 +8,7 @@ reported as null and listed in unknown_fields. Nothing is ever invented.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from .exceptions import PolicyNotFoundError, ValidationError as PSAValidationError
@@ -20,6 +21,18 @@ from .utils import (
     logger,
     sanitize_collection_name,
 )
+
+
+KEY_FIELDS = [
+    "insurer_name",
+    "policy_name",
+    "sum_insured",
+    "room_rent_limit",
+    "copay_percentage",
+    "exclusions",
+    "waiting_periods",
+    "claim_conditions",
+]
 
 
 class PolicyExtractor:
@@ -86,6 +99,9 @@ class PolicyExtractor:
 
         details.source_filename = file_name
         details.extracted_at = details.extracted_at or datetime.now(timezone.utc).isoformat()
+        # Don't rely on the LLM to report gaps: derive them from the values themselves.
+        missing = [f for f in KEY_FIELDS if getattr(details, f) in (None, [], "")]
+        details.unknown_fields = list(dict.fromkeys(list(details.unknown_fields) + missing))
         return details
 
     @staticmethod
@@ -132,7 +148,7 @@ def load_policy_details(
     policy_id: str, policies_dir: Optional[str] = None
 ) -> PolicyDetails:
     """Load previously saved policy details. Raises PolicyNotFoundError if absent."""
-    directory = policies_dir or POLICIES_DIR
+    directory = Path(policies_dir or POLICIES_DIR)
     path = directory / f"{sanitize_collection_name(policy_id)}.json"
     if not path.exists():
         raise PolicyNotFoundError(policy_id)
@@ -143,3 +159,11 @@ def load_policy_details(
         raise
     except Exception as exc:
         raise PolicyNotFoundError(f"Policy {policy_id} details are corrupt: {exc}") from exc
+
+
+def list_policy_ids(policies_dir: Optional[Path] = None) -> list[str]:
+    """Ids (sanitized file stems) of every policy whose details have been saved."""
+    directory = Path(policies_dir or POLICIES_DIR)
+    if not directory.exists():
+        return []
+    return sorted(p.stem for p in directory.glob("*.json"))
