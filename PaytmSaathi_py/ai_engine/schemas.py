@@ -229,6 +229,8 @@ class RAGResponse(BaseModel):
     confidence: ConfidenceLevel = ConfidenceLevel.low
     insufficient_evidence: bool = False
     conversation_id: Optional[str] = None
+    language: str = "en"  # language of `answer` ("en" or "hi")
+    answer_en: Optional[str] = None  # English original when `answer` was translated
 
 
 class SimpleExplanation(BaseModel):
@@ -241,6 +243,7 @@ class SimpleExplanation(BaseModel):
     page_number: Optional[int] = None
     original_clause: str
     simple_explanation: str
+    language: str = "en"  # language of `simple_explanation`
     source_filename: Optional[str] = None
 
 
@@ -268,3 +271,138 @@ class ClaimRelevantClausesResult(BaseModel):
     structured_conditions: dict = Field(default_factory=dict)
     missing_information: list[str] = Field(default_factory=list)
 
+
+
+# ---------------------------------------------------------------------------
+# Hospital bill + payout estimate models
+# ---------------------------------------------------------------------------
+class BillLineItem(BaseModel):
+    """One charge on a hospital bill."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    description: str
+    category: str = "other"  # room_rent | icu_rent | doctor_fees | surgery | nursing |
+    #                          medicines | investigations | consumables | non_payable | other
+    quantity: Optional[float] = None
+    unit_price: Optional[float] = None
+    amount: float = 0.0
+    is_payable: bool = True
+    note: Optional[str] = None
+
+    @field_validator("amount", "quantity", "unit_price", mode="before")
+    @classmethod
+    def _clean_number(cls, value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = re.sub(r"[^\d.\-]", "", value)
+            try:
+                return float(cleaned) if cleaned not in ("", "-", ".") else None
+            except ValueError:
+                return None
+        return value
+
+    @field_validator("amount", mode="after")
+    @classmethod
+    def _amount_not_none(cls, value):
+        return 0.0 if value is None else value
+
+
+class HospitalBill(BaseModel):
+    """Structured hospital bill. Missing fields stay `None`, never guessed."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    hospital_name: Optional[str] = None
+    patient_name: Optional[str] = None
+    bill_number: Optional[str] = None
+    admission_date: Optional[str] = None
+    discharge_date: Optional[str] = None
+    days_of_stay: Optional[int] = None
+    diagnosis: Optional[str] = None
+    procedure: Optional[str] = None
+    room_type: Optional[str] = None
+    is_network_hospital: Optional[bool] = None
+    line_items: list[BillLineItem] = Field(default_factory=list)
+    stated_total: Optional[float] = None
+    computed_total: float = 0.0
+    extraction_method: str = "heuristic"  # heuristic | llm | manual
+    used_ocr: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    source_filename: Optional[str] = None
+    language: str = "en"
+
+    @field_validator("stated_total", mode="before")
+    @classmethod
+    def _clean_total(cls, value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = re.sub(r"[^\d.]", "", value)
+            try:
+                return float(cleaned) if cleaned else None
+            except ValueError:
+                return None
+        return value
+
+
+class ClaimContext(BaseModel):
+    """Facts about the claim that are not on the bill."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    policy_age_days: Optional[int] = None  # days since policy start (waiting periods)
+    previously_claimed: float = 0.0  # already used from the sum insured this year
+    is_pre_existing: bool = False
+    apply_proportionate_deduction: bool = True
+    room_rent_is_per_day: bool = True
+
+
+class PayoutStep(BaseModel):
+    """One transparent step of the estimate, with the clause it relies on."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    step: str
+    description: str
+    description_hi: Optional[str] = None
+    amount_before: float
+    amount_after: float
+    deduction: float = 0.0
+    clause_reference: Optional[str] = None
+    source_page: Optional[int] = None
+
+
+class PayoutEstimate(BaseModel):
+    """Deterministic claim payout estimate. Never a guarantee of approval."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    policy_id: Optional[str] = None
+    bill_total: float
+    non_payable_total: float = 0.0
+    room_rent_deduction: float = 0.0
+    proportionate_deduction: float = 0.0
+    sub_limit_deduction: float = 0.0
+    deductible_applied: float = 0.0
+    copay_amount: float = 0.0
+    sum_insured_cap_deduction: float = 0.0
+    payout_if_covered: float = 0.0
+    estimated_payout: float = 0.0
+    patient_pays: float = 0.0
+    eligibility_status: str = "likely_payable"  # likely_payable | needs_review | likely_excluded
+    steps: list[PayoutStep] = Field(default_factory=list)
+    flags: list[str] = Field(default_factory=list)
+    flags_hi: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    disclaimer: str = (
+        "This is an estimate based on the policy details extracted by AI and the bill "
+        "provided. It is not a claim approval or a guarantee of payment. The insurer's "
+        "final decision applies."
+    )

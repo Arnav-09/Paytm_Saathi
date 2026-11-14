@@ -89,3 +89,30 @@ class InvalidQuestionError(PaytmSaathiError):
 
     def __init__(self, message: str):
         super().__init__(message, "invalid_question")
+
+
+class OCRUnavailableError(PaytmSaathiError):
+    """Raised when OCR is needed but no OCR backend is installed."""
+
+    def __init__(
+        self,
+        message: str = (
+            "OCR is required but no OCR engine is installed. "
+            "Run: pip install rapidocr-onnxruntime   (or install Tesseract + pytesseract)."
+        ),
+    ):
+        super().__init__(message, "ocr_unavailable")
+
+
+class BillExtractionError(PaytmSaathiError):
+    """Raised when a hospital bill cannot be read or contains no line items."""
+
+    def __init__(self, message: str):
+        super().__init__(message, "bill_extraction_error")
+
+
+class CalculationInputError(PaytmSaathiError):
+    """Raised when inputs to a financial calculation are invalid."""
+
+    def __init__(self, message: str):
+        super().__init__(message, "calculation_input_error")
