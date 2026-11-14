@@ -168,3 +168,28 @@ def test_groq_preset_with_key(monkeypatch):
     assert isinstance(llm, OpenAICompatibleProvider)
     assert llm.base_url == "https://api.groq.com/openai/v1" and llm.label == "Groq"
     assert provider_status()["connected"]
+
+
+# ----------------------------- regressions --------------------------------
+@pytest.mark.parametrize("text,days", [
+    ("30 days", 30), ("24 months", 730), ("36 months", 1095), ("9 months", 274),
+    ("2 years", 730), ("3 yrs", 1095), ("48", 48), ("no number", None),
+])
+def test_duration_to_days(text, days):
+    from ai_engine.schemas import duration_to_days
+
+    assert duration_to_days(text) == days
+
+
+def test_waiting_period_days_filled_from_months():
+    w = WaitingPeriodEntry(condition="Pre-existing diseases", duration="36 months", duration_days=None)
+    assert w.duration_days == 1095
+    assert WaitingPeriodEntry(condition="x", duration_days="24 months").duration_days == 730
+
+
+def test_registry_collection_name_is_valid_for_chromadb():
+    import re
+
+    from ai_engine.vector_store import POLICY_REGISTRY_COLLECTION
+
+    assert re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{1,510}[a-zA-Z0-9]", POLICY_REGISTRY_COLLECTION)

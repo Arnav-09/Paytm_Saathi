@@ -194,20 +194,21 @@ def ask_policy_question(
 ) -> RAGResponse:
     """Answer a question about a policy, with citations and conversation context.
 
-    ``language`` is "en" or "hi". When omitted it is detected from the question, so a
-    Hindi question gets a Hindi answer. Retrieval always runs in English; citations keep
+    ``language`` is a code: "en", "hi", "mr", "bn", "ta", "te" or "gu". When omitted it is
+    detected from the question's script, so a Hindi question gets a Hindi answer. Retrieval
+    always runs in English; citations keep
     the policy's original wording. If translation cannot be done safely (numbers or
     citations would change) the English answer is returned with ``language="en"``.
     """
     engine = _get_engine()
     target = normalize_language(language) if language else detect_language(question)
-    english_question = question_to_english(question, engine.llm) if target == "hi" else question
+    english_question = question_to_english(question, engine.llm) if target != "en" else question
     response = engine.ask(policy_id, english_question, conversation_id)
     response.question = question  # echo what the user actually typed
-    if target == "hi":
-        translated, ok = translate_text(response.answer, "hi", engine.llm)
+    if target != "en":
+        translated, ok = translate_text(response.answer, target, engine.llm)
         if ok:
-            response.answer_en, response.answer, response.language = response.answer, translated, "hi"
+            response.answer_en, response.answer, response.language = response.answer, translated, target
     return response
 
 
@@ -222,10 +223,11 @@ def explain_policy_clause(
     """Retrieve a clause and explain it in simple language (English or Hindi)."""
     engine = _get_engine()
     result = engine.explain_policy_clause(policy_id, clause_reference)
-    if normalize_language(language) == "hi":
-        translated, ok = translate_text(result.simple_explanation, "hi", engine.llm)
+    target = normalize_language(language)
+    if target != "en":
+        translated, ok = translate_text(result.simple_explanation, target, engine.llm)
         if ok:
-            result.simple_explanation, result.language = translated, "hi"
+            result.simple_explanation, result.language = translated, target
     return result
 
 
@@ -265,8 +267,9 @@ def explain_clause_text(text: str, language: Optional[str] = "en") -> SimpleExpl
             simplification_prompt(original), system_prompt=MANDATORY_RAG_INSTRUCTIONS).strip()
     result = SimpleExplanation(policy_id="pasted_text", original_clause=original,
                                simple_explanation=explanation)
-    if normalize_language(language) == "hi":
-        translated, ok = translate_text(result.simple_explanation, "hi", engine.llm)
+    target = normalize_language(language)
+    if target != "en":
+        translated, ok = translate_text(result.simple_explanation, target, engine.llm)
         if ok:
-            result.simple_explanation, result.language = translated, "hi"
+            result.simple_explanation, result.language = translated, target
     return result

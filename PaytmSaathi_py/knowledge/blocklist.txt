@@ -1,0 +1,8 @@
+# Known scam domains, one per line. Subdomains match too. Lines starting with # are ignored.
+#
+# This file ships with ONLY reserved example domains, because we do not have a verified feed of
+# live scam sites. To make the scam check stronger, add domains reported to you, or domains from
+# an official source such as https://cybercrime.gov.in or a vetted threat-intelligence feed.
+# You can also add private entries in data/blocklist.txt (not committed to git).
+paytm-kyc-update.example
+free-cashback-claim.example

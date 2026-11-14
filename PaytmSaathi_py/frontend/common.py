@@ -9,29 +9,61 @@ import streamlit as st
 
 from ai_engine import accounts
 from ai_engine.exceptions import PaytmSaathiError
+from ai_engine.language import SUPPORTED_LANGUAGES
 from ai_engine.llm_provider import provider_status
 from ai_engine.policy_extractor import list_policy_ids
 from ai_engine.utils import sanitize_collection_name
+from frontend.i18n import tr
 
-HINDI_LABEL = "हिन्दी"
-LANG_OPTIONS = ["English", HINDI_LABEL]
+LANG_OPTIONS = list(SUPPORTED_LANGUAGES.values())  # native names, shown in the picker
+HINDI_LABEL = SUPPORTED_LANGUAGES["hi"]
+_CODE_BY_LABEL = {label: code for code, label in SUPPORTED_LANGUAGES.items()}
 
 
 # ---------------------------------------------------------------------------
 # Language
 # ---------------------------------------------------------------------------
 def lang() -> str:
-    """'hi' or 'en', from the language toggle (read at call time)."""
-    return "hi" if st.session_state.get("lang_choice") == HINDI_LABEL else "en"
+    """Language code ('en', 'hi', 'mr', 'bn', 'ta', 'te', 'gu') from the language picker."""
+    return _CODE_BY_LABEL.get(st.session_state.get("lang_choice"), "en")
+
+
+def label_for(code: str) -> str:
+    return SUPPORTED_LANGUAGES.get(code, "English")
 
 
 def L(en: str, hi: str) -> str:
-    return hi if lang() == "hi" else en
+    """English or Hindi text as written; other languages come from the translation catalog."""
+    code = lang()
+    if code == "en":
+        return en
+    if code == "hi":
+        return hi
+    return tr(en, code)
 
 
 def pick(en_list, hi_list):
-    """Hindi list when Hindi is selected and available, else English."""
-    return hi_list if lang() == "hi" and hi_list else en_list
+    """Hindi list when Hindi is selected and available; other languages translate the English list."""
+    code = lang()
+    if code == "hi" and hi_list:
+        return hi_list
+    if code not in ("en", "hi"):
+        return [tr(t, code) for t in en_list]
+    return en_list
+
+
+def bi(item: dict, en_key: str = "en", hi_key: str = "hi") -> str:
+    """Text from a {'en': ..., 'hi': ...} dict in the selected language."""
+    code = lang()
+    if code == "hi":
+        return item.get(hi_key) or item[en_key]
+    return item[en_key] if code == "en" else tr(item[en_key], code)
+
+
+def pair(labels: tuple[str, str]) -> str:
+    """Text from an (English, Hindi) tuple in the selected language."""
+    code = lang()
+    return labels[1] if code == "hi" else (labels[0] if code == "en" else tr(labels[0], code))
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +81,7 @@ def uid() -> str:
 def login(user: accounts.PublicUser) -> None:
     st.session_state["user"] = user
     # The language toggle may already be on screen this run; apply on the next run.
-    st.session_state["_pending_lang"] = HINDI_LABEL if user.preferred_language == "hi" else "English"
+    st.session_state["_pending_lang"] = label_for(user.preferred_language)
 
 
 def apply_pending_state() -> None:
@@ -72,7 +104,7 @@ def run(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except accounts.AccountError as exc:
-        st.error(exc.message_hi if lang() == "hi" else exc.message)
+        st.error(exc.message_hi if lang() == "hi" else (exc.message if lang() == "en" else tr(exc.message, lang())))
     except PaytmSaathiError as exc:
         st.error(exc.message)
     except Exception as exc:  # unexpected: still no raw traceback for the user
@@ -145,8 +177,8 @@ def brand_bar() -> None:
         chip = (f'<span class="ps-chip" title="{esc(tip)}"><span class="ps-dot" style="background:#D98A00"></span>'
                 f'{esc(L("Demo mode (no AI key)", "डेमो मोड (एआई कुंजी नहीं)"))}</span>')
     c2.markdown(chip, unsafe_allow_html=True)
-    c3.radio("Language", LANG_OPTIONS, key="lang_choice", horizontal=True, label_visibility="collapsed",
-             on_change=_save_language)
+    c3.selectbox("Language", LANG_OPTIONS, key="lang_choice", label_visibility="collapsed",
+                 on_change=_save_language)
     if user:
         with c4.popover(f"👤 {user.first_name}", width="stretch"):
             st.markdown(f"**{user.full_name}**  \n📱 {user.masked_mobile}" + (f"  \n✉️ {user.email}" if user.email else ""))
