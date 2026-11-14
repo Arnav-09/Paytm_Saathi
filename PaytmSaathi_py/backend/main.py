@@ -67,7 +67,7 @@ _STATUS = {
     "password_mismatch": 422, "terms_not_accepted": 422, "missing_credentials": 400,
     "mobile_taken": 409, "email_taken": 409, "invalid_credentials": 401, "invalid_token": 401,
     "account_locked": 429, "server_misconfigured": 500, "account_storage_error": 500,
-    "attachment_not_found": 404,
+    "attachment_not_found": 404, "evidence_rejected": 422,
 }
 
 
@@ -76,7 +76,8 @@ async def engine_error_handler(_: Request, exc: PaytmSaathiError):
     return JSONResponse(
         status_code=_STATUS.get(exc.error_code, 400),
         content={"error": exc.error_code, "message": exc.message,
-                 **({"message_hi": exc.message_hi} if isinstance(exc, accounts.AccountError) else {})},
+                 **({"message_hi": exc.message_hi} if getattr(exc, "message_hi", None) else {}),
+                 **({"reasons": exc.reasons} if getattr(exc, "reasons", None) else {})},
     )
 
 
@@ -270,7 +271,7 @@ def kyc(body: KYCRequest):
 class DisputeRequest(BaseModel):
     description: str
     amount: Optional[float] = None
-    transaction_id: Optional[str] = None
+    transaction_id: str = Field(..., min_length=6, max_length=30, description="UTR / UPI Ref No / Txn ID (required: evidence is checked against it)")
     dispute_type: Optional[str] = None
     transaction_date: Optional[str] = Field(None, description="YYYY-MM-DD")
 
@@ -421,7 +422,9 @@ def dispute_complaint(ticket_id: str, recipient: str = "app", user_id: str = Dep
 async def add_ticket_attachment(ticket_id: str, file: UploadFile = File(...), user_id: str = Depends(current_user_id)):
     """Attach a PNG/JPG/PDF screenshot (max 5 MB). The type is verified from the file's content."""
     data = await file.read(fintech.MAX_ATTACHMENT_BYTES + 1)
-    return await run_in_threadpool(fintech.add_attachment, ticket_id, user_id, file.filename or "file", data)
+    user = accounts.get_user(user_id)
+    return await run_in_threadpool(fintech.add_attachment, ticket_id, user_id, file.filename or "file", data, None,
+                                   user.full_name if user else "")
 
 
 class SmsBody(BaseModel):

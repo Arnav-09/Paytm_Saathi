@@ -122,7 +122,9 @@ def test_api_ticket_ownership_and_evidence(client, tmp_path, monkeypatch):
         return {"Authorization": "Bearer " + r.json()["token"]}
 
     alice, bob = register("9876500001"), register("9876500002")
-    t = client.post("/fintech/disputes", json={"description": "money debited but payment failed"}, headers=alice).json()
+    assert client.post("/fintech/disputes", json={"description": "no txn id"}, headers=alice).status_code == 422  # txn ID required
+    monkeypatch.setattr("ai_engine.fintech._read_document_text", lambda ext, data: "From: Test User. UPI Ref No 998877665540")
+    t = client.post("/fintech/disputes", json={"description": "money debited but payment failed", "transaction_id": "998877665540"}, headers=alice).json()
     tid = t["ticket_id"]
     assert client.get(f"/fintech/disputes/{tid}", headers=alice).status_code == 200
     assert client.get(f"/fintech/disputes/{tid}", headers=bob).status_code == 404  # not someone else's
@@ -131,7 +133,10 @@ def test_api_ticket_ownership_and_evidence(client, tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["kind"] == "screenshot"
     fake = client.post(f"/fintech/disputes/{tid}/attachments", headers=alice, files={"file": ("x.png", b"MZ evil", "image/png")})
     assert fake.status_code == 400
-    sms = client.post(f"/fintech/disputes/{tid}/sms", headers=alice, json={"text": "Rs 500 debited. OTP is 482913"})
+    bad = client.post(f"/fintech/disputes/{tid}/sms", headers=alice, json={"text": "Rs 500 debited. OTP is 482913"})
+    assert bad.status_code == 422 and bad.json()["error"] == "evidence_rejected" and len(bad.json()["reasons"]) == 2
+    sms = client.post(f"/fintech/disputes/{tid}/sms", headers=alice, json={"text": "Rs 500 debited on 01/11/2026. Ref No 998877665540. OTP is 482913"})
+    assert sms.status_code == 200, sms.text
     assert "482913" not in sms.json()["text"]
     pack = client.get(f"/fintech/disputes/{tid}/evidence-pack", headers=alice)
     assert pack.status_code == 200 and pack.headers["content-type"] == "application/zip"

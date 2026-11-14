@@ -118,3 +118,13 @@ class CalculationInputError(PaytmSaathiError):
 
     def __init__(self, message: str):
         super().__init__(message, "calculation_input_error")
+
+
+class EvidenceRejectedError(PaytmSaathiError):
+    """Evidence (SMS / screenshot / PDF) did not pass verification against the ticket and the user."""
+
+    def __init__(self, reasons: list[str], reasons_hi: list[str] | None = None):
+        self.reasons = reasons
+        self.reasons_hi = reasons_hi or reasons
+        self.message_hi = "सबूत स्वीकार नहीं हुआ: " + " ".join(self.reasons_hi)
+        super().__init__("Evidence rejected: " + " ".join(reasons), "evidence_rejected")
