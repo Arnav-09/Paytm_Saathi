@@ -67,6 +67,7 @@ _STATUS = {
     "password_mismatch": 422, "terms_not_accepted": 422, "missing_credentials": 400,
     "mobile_taken": 409, "email_taken": 409, "invalid_credentials": 401, "invalid_token": 401,
     "account_locked": 429, "server_misconfigured": 500, "account_storage_error": 500,
+    "attachment_not_found": 404,
 }
 
 
@@ -77,6 +78,20 @@ async def engine_error_handler(_: Request, exc: PaytmSaathiError):
         content={"error": exc.error_code, "message": exc.message,
                  **({"message_hi": exc.message_hi} if isinstance(exc, accounts.AccountError) else {})},
     )
+
+
+def current_user_id(authorization: str = Header("", description="Bearer <token>")) -> str:
+    """Dependency: the logged-in user's id from the signed token."""
+    token = authorization.removeprefix("Bearer ").strip()
+    return accounts.verify_token(token)
+
+
+def own_ticket(ticket_id: str, user_id: str) -> "fintech.DisputeTicket":
+    """Load a ticket only if it belongs to the caller (others get the same 'not found')."""
+    ticket = fintech.get_dispute_ticket(ticket_id)
+    if ticket.user_id != user_id:
+        raise PaytmSaathiError(f"Ticket not found: {ticket_id}", "ticket_not_found")
+    return ticket
 
 
 async def _save_upload(upload: UploadFile, directory: Path) -> Path:
@@ -257,25 +272,29 @@ class DisputeRequest(BaseModel):
     amount: Optional[float] = None
     transaction_id: Optional[str] = None
     dispute_type: Optional[str] = None
+    transaction_date: Optional[str] = Field(None, description="YYYY-MM-DD")
 
 
 @app.post("/fintech/disputes", response_model=fintech.DisputeTicket, tags=["fintech"])
-def create_dispute(body: DisputeRequest):
-    return fintech.create_dispute_ticket(**body.model_dump())
+def create_dispute(body: DisputeRequest, user_id: str = Depends(current_user_id)):
+    """Create a ticket owned by the logged-in user."""
+    return fintech.create_dispute_ticket(**body.model_dump(), user_id=user_id)
 
 
 @app.get("/fintech/disputes/{ticket_id}", response_model=fintech.DisputeTicket, tags=["fintech"])
-def get_dispute(ticket_id: str):
-    return fintech.get_dispute_ticket(ticket_id)
+def get_dispute(ticket_id: str, user_id: str = Depends(current_user_id)):
+    return own_ticket(ticket_id, user_id)
 
 
 class ScamRequest(BaseModel):
     text: str
+    sender: Optional[str] = Field(None, description="SMS header (e.g. VM-HDFCBK) or phone number it came from")
 
 
 @app.post("/fintech/scam-check", response_model=fintech.ScamAssessment, tags=["fintech"])
 def scam_check(body: ScamRequest):
-    return fintech.check_scam_message(body.text)
+    """Checks wording, links, phone numbers and the sender."""
+    return fintech.check_scam_message(body.text, body.sender)
 
 
 # ---------------------------------------------------------------------------
@@ -315,11 +334,6 @@ class LoginRequest(BaseModel):
 class AuthResponse(BaseModel):
     token: str
     user: accounts.PublicUser
-
-
-def current_user_id(authorization: str = Header("", description="Bearer <token>")) -> str:
-    token = authorization.removeprefix("Bearer ").strip()
-    return accounts.verify_token(token)
 
 
 @app.post("/auth/register", response_model=AuthResponse, tags=["auth"])
@@ -389,10 +403,100 @@ def my_disputes(user_id: str = Depends(current_user_id)):
 
 
 @app.get("/fintech/disputes/{ticket_id}/timeline", response_model=list[fintech.EscalationStep], tags=["fintech"])
-def dispute_timeline(ticket_id: str):
-    return fintech.escalation_timeline(fintech.get_dispute_ticket(ticket_id))
+def dispute_timeline(ticket_id: str, user_id: str = Depends(current_user_id)):
+    return fintech.escalation_timeline(own_ticket(ticket_id, user_id))
 
 
 @app.get("/fintech/disputes/{ticket_id}/complaint", tags=["fintech"])
-def dispute_complaint(ticket_id: str, recipient: str = "app", name: str = ""):
-    return {"text": fintech.draft_complaint(fintech.get_dispute_ticket(ticket_id), name, recipient)}
+def dispute_complaint(ticket_id: str, recipient: str = "app", user_id: str = Depends(current_user_id)):
+    user = accounts.get_user(user_id)
+    return {"text": fintech.draft_complaint(own_ticket(ticket_id, user_id), user.full_name if user else "", recipient,
+                                            user.masked_mobile if user else None)}
+
+
+# ---------------------------------------------------------------------------
+# Evidence attachments (login required; users only reach their own tickets)
+# ---------------------------------------------------------------------------
+@app.post("/fintech/disputes/{ticket_id}/attachments", response_model=fintech.Attachment, tags=["fintech"])
+async def add_ticket_attachment(ticket_id: str, file: UploadFile = File(...), user_id: str = Depends(current_user_id)):
+    """Attach a PNG/JPG/PDF screenshot (max 5 MB). The type is verified from the file's content."""
+    data = await file.read(fintech.MAX_ATTACHMENT_BYTES + 1)
+    return await run_in_threadpool(fintech.add_attachment, ticket_id, user_id, file.filename or "file", data)
+
+
+class SmsBody(BaseModel):
+    text: str
+
+
+@app.post("/fintech/disputes/{ticket_id}/sms", response_model=fintech.Attachment, tags=["fintech"])
+def add_ticket_sms(ticket_id: str, body: SmsBody, user_id: str = Depends(current_user_id)):
+    """Attach pasted SMS text. OTPs, PINs and card numbers are removed before saving."""
+    return fintech.add_sms_text(ticket_id, user_id, body.text)
+
+
+@app.delete("/fintech/disputes/{ticket_id}/attachments/{attachment_id}", tags=["fintech"])
+def remove_ticket_attachment(ticket_id: str, attachment_id: str, user_id: str = Depends(current_user_id)):
+    fintech.remove_attachment(ticket_id, user_id, attachment_id)
+    return {"removed": attachment_id}
+
+
+@app.get("/fintech/disputes/{ticket_id}/evidence-pack", tags=["fintech"])
+def evidence_pack(ticket_id: str, recipient: str = "app", user_id: str = Depends(current_user_id)):
+    """ZIP with the complaint letter, all attachments and a checksum index."""
+    from fastapi.responses import Response
+
+    ticket = own_ticket(ticket_id, user_id)
+    user = accounts.get_user(user_id)
+    data = fintech.build_evidence_pack(ticket, user.full_name if user else "", recipient, user.masked_mobile if user else None)
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{ticket_id}_evidence.zip"'})
+
+
+# ---------------------------------------------------------------------------
+# Chat assistant (RAG + MCP tools + guardrails)
+# ---------------------------------------------------------------------------
+_ASSISTANT = None
+
+
+def get_assistant():
+    global _ASSISTANT
+    if _ASSISTANT is None:
+        from ai_engine.assistant import Assistant
+
+        _ASSISTANT = Assistant()
+    return _ASSISTANT
+
+
+class ChatTurn(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list[ChatTurn] = Field(default_factory=list, max_length=20)
+    language: str = "en"
+    policy_id: Optional[str] = Field(None, description="One of the caller's own policies (optional)")
+
+
+@app.post("/chat", tags=["chat"])
+async def chat(body: ChatRequest, user_id: str = Depends(current_user_id)):
+    """Saathi assistant. Input and output pass through guardrails; tools run over MCP."""
+    from ai_engine.assistant import ChatContext
+
+    user = accounts.get_user(user_id)
+    if user is None:
+        raise HTTPException(401, "Please log in again.")
+    if body.policy_id and body.policy_id not in accounts.user_policy_ids(user_id):
+        raise HTTPException(404, "Policy not found.")  # never let a caller query someone else's policy
+    ctx = ChatContext(user_id=user_id, user_name=user.first_name, language=body.language, policy_id=body.policy_id,
+                      policy_label=body.policy_id or "")
+    history = [t.model_dump() for t in body.history if t.role in ("user", "assistant")]
+    return await run_in_threadpool(get_assistant().chat, body.message, history, ctx)
+
+
+@app.get("/languages", tags=["language"])
+def languages():
+    from ai_engine.language import SUPPORTED_LANGUAGES
+
+    return SUPPORTED_LANGUAGES

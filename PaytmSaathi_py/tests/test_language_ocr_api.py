@@ -95,7 +95,7 @@ def test_api_health_and_emi(client):
 def test_api_engine_errors_map_to_http_status(client):
     res = client.post("/lending/emi", json={"principal": 0, "annual_rate_pct": 12, "tenure_months": 12})
     assert res.status_code == 422 and res.json()["error"] == "calculation_input_error"
-    assert client.get("/fintech/disputes/DSP-20250101-ABCDEF").status_code == 404
+    assert client.get("/fintech/disputes/DSP-20250101-ABCDEF").status_code == 401  # tickets now require login
 
 
 def test_api_scam_and_validate(client):
@@ -108,3 +108,86 @@ def test_api_scam_and_validate(client):
 def test_api_rejects_non_pdf_policy_upload(client):
     res = client.post("/policies/test_policy/ingest", files={"file": ("x.txt", b"hello", "text/plain")})
     assert res.status_code == 400 and res.json()["error"] == "invalid_file"
+
+
+def test_api_ticket_ownership_and_evidence(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_SECRET", "test-secret")
+    monkeypatch.setattr("ai_engine.accounts.USERS_FILE", str(tmp_path / "users.json"))
+    monkeypatch.setattr("ai_engine.fintech.DISPUTES_DIR", str(tmp_path / "disputes"))
+
+    def register(mobile):
+        r = client.post("/auth/register", json={"full_name": "Test User", "mobile": mobile, "password": "secret123",
+                                                "confirm_password": "secret123", "accepted_terms": True})
+        assert r.status_code == 200, r.text
+        return {"Authorization": "Bearer " + r.json()["token"]}
+
+    alice, bob = register("9876500001"), register("9876500002")
+    t = client.post("/fintech/disputes", json={"description": "money debited but payment failed"}, headers=alice).json()
+    tid = t["ticket_id"]
+    assert client.get(f"/fintech/disputes/{tid}", headers=alice).status_code == 200
+    assert client.get(f"/fintech/disputes/{tid}", headers=bob).status_code == 404  # not someone else's
+    r = client.post(f"/fintech/disputes/{tid}/attachments", headers=alice,
+                    files={"file": ("shot.png", b"\x89PNG\r\n\x1a\n" + b"0" * 40, "image/png")})
+    assert r.status_code == 200 and r.json()["kind"] == "screenshot"
+    fake = client.post(f"/fintech/disputes/{tid}/attachments", headers=alice, files={"file": ("x.png", b"MZ evil", "image/png")})
+    assert fake.status_code == 400
+    sms = client.post(f"/fintech/disputes/{tid}/sms", headers=alice, json={"text": "Rs 500 debited. OTP is 482913"})
+    assert "482913" not in sms.json()["text"]
+    pack = client.get(f"/fintech/disputes/{tid}/evidence-pack", headers=alice)
+    assert pack.status_code == 200 and pack.headers["content-type"] == "application/zip"
+    assert client.get(f"/fintech/disputes/{tid}/evidence-pack", headers=bob).status_code == 404
+
+
+def test_api_chat_requires_login_and_own_policy(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_SECRET", "test-secret")
+    monkeypatch.setattr("ai_engine.accounts.USERS_FILE", str(tmp_path / "users.json"))
+    assert client.post("/chat", json={"message": "hi"}).status_code == 401
+    r = client.post("/auth/register", json={"full_name": "Chat User", "mobile": "9876500003", "password": "secret123",
+                                            "confirm_password": "secret123", "accepted_terms": True})
+    headers = {"Authorization": "Bearer " + r.json()["token"]}
+    assert client.post("/chat", json={"message": "hi", "policy_id": "someone_elses_policy"}, headers=headers).status_code == 404
+
+    import backend.main as api
+    from ai_engine.assistant import ChatResult
+
+    class FakeAssistant:
+        def chat(self, message, history, ctx):
+            return ChatResult(answer=f"echo:{ctx.user_id}:{len(history)}", user_text=message)
+
+    monkeypatch.setattr(api, "_ASSISTANT", FakeAssistant())
+    out = client.post("/chat", json={"message": "hi", "history": [{"role": "user", "content": "x"}]}, headers=headers).json()
+    assert out["answer"].startswith("echo:U") and out["answer"].endswith(":1")
+
+
+def test_api_languages(client):
+    assert set(client.get("/languages").json()) == {"en", "hi", "mr", "bn", "ta", "te", "gu"}
+
+
+def test_more_languages_detection_and_normalisation():
+    assert language.detect_language("எனது பாலிசியில் அறை வாடகை எவ்வளவு?") == "ta"
+    assert language.detect_language("আমার পলিসিতে রুম ভাড়া কত?") == "bn"
+    assert language.detect_language("મારી પોલિસીમાં રૂમ ભાડું કેટલું છે?") == "gu"
+    assert language.detect_language("నా పాలసీలో గది అద్దె ఎంత?") == "te"
+    assert language.normalize_language("Marathi") == "mr" and language.normalize_language("தமிழ்") == "ta"
+    assert language.normalize_language("klingon") == "en"
+
+
+def test_translation_to_tamil_checks_script_and_native_digits():
+    original = "Room rent limit is ₹5,000 per day [K1]"
+    good = "அறை வாடகை வரம்பு ஒரு நாளைக்கு ₹௫,௦௦௦ [K1]"  # Tamil digits are accepted
+    assert language.translate_text(original, "ta", FakeLLM(good)) == (good, True)
+    assert language.translate_text(original, "ta", FakeLLM("अभी हिंदी में ₹5,000 [K1]")) == (original, False)  # wrong script
+    assert language.translate_text(original, "ta", FakeLLM("அறை வாடகை ₹6,000 [K1]")) == (original, False)  # number changed
+
+
+def test_ui_catalog_lookup_without_live_translation(tmp_path, monkeypatch):
+    import json as _json
+
+    from frontend import i18n
+
+    (tmp_path / "ta.json").write_text(_json.dumps({"Log in": "உள்நுழை"}), encoding="utf-8")
+    monkeypatch.setattr(i18n, "LOCALES_DIR", tmp_path)
+    monkeypatch.setattr(i18n, "_CATALOGS", {})
+    assert i18n.tr("Log in", "ta", live=False) == "உள்நுழை"
+    assert i18n.tr("Not translated yet", "ta", live=False) == "Not translated yet"
+    assert i18n.tr("Log in", "en") == "Log in" and i18n.tr("Log in", "hi") == "Log in"

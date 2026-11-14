@@ -24,6 +24,9 @@ def render() -> None:
         f'<p>{esc(L("Ask in plain English or Hindi, understand your documents, and finish important money tasks with confidence.", "सरल हिंदी या अंग्रेज़ी में पूछें, अपने दस्तावेज़ समझें और पैसों के ज़रूरी काम भरोसे के साथ पूरे करें।"))}</p>'
         "</div>", unsafe_allow_html=True)
 
+    chat_page = st.session_state.get("_pages", {}).get("chat")
+    if chat_page is not None:
+        st.page_link(chat_page, label=L("Ask Saathi anything - insurance, loans, payments or general questions", "साथी से कुछ भी पूछिए - बीमा, लोन, पेमेंट या कोई भी सवाल"), icon="💬")
     tickets = fintech.list_dispute_tickets(uid())
     open_tickets = [t for t in tickets if t.status == "open"]
     s1, s2, s3, s4 = st.columns(4)
