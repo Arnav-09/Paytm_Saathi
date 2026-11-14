@@ -23,6 +23,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 from .exceptions import PaytmSaathiError
+from .language import normalize_language
 from .utils import POLICIES_DIR, ensure_dir
 
 USERS_FILE = os.getenv("USERS_FILE", str(Path(POLICIES_DIR).parent / "users.json"))
@@ -150,7 +151,7 @@ def register_user(
     if not accepted_terms:
         raise AccountError("Please accept the terms and privacy policy to continue.",
                            "आगे बढ़ने के लिए शर्तें और गोपनीयता नीति स्वीकार करें।", "terms_not_accepted")
-    language = "hi" if preferred_language == "hi" else "en"
+    language = normalize_language(preferred_language)
 
     with _LOCK:
         data = _load(users_file)
@@ -220,7 +221,7 @@ def update_language(user_id: str, language: str, users_file: Optional[str] = Non
     with _LOCK:
         data = _load(users_file)
         if user_id in data["users"]:
-            data["users"][user_id]["preferred_language"] = "hi" if language == "hi" else "en"
+            data["users"][user_id]["preferred_language"] = normalize_language(language)
             _save(data, users_file)
 
 

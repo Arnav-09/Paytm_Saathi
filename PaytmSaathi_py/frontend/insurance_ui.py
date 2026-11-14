@@ -33,7 +33,7 @@ from ai_engine.policy_insights import (
 )
 from ai_engine.schemas import BillLineItem
 from frontend.common import (
-    L, current_policy, demo_mode, lang, my_policies, need_policy, pick, policy_key,
+    L, bi, current_policy, demo_mode, lang, my_policies, need_policy, pair, pick, policy_key,
     policy_label, run, safe_name, uid,
 )
 from frontend.theme import alert, empty_state, esc, inr, note, page_header, pill, steps
@@ -272,7 +272,7 @@ def tab_claim():
         column_config={
             "description": st.column_config.TextColumn(L("Item", "आइटम"), width="large"),
             "category": st.column_config.SelectboxColumn(L("Category", "श्रेणी"), options=CATEGORIES,
-                                                         format_func=lambda c: CATEGORY_LABELS.get(c, (c, c))[lang() == "hi"]),
+                                                         format_func=lambda c: pair(CATEGORY_LABELS.get(c, (c, c)))),
             "quantity": st.column_config.NumberColumn(L("Qty / days", "मात्रा/दिन"), min_value=0),
             "amount": st.column_config.NumberColumn(L("Amount (₹)", "राशि (₹)"), min_value=0, format="%.2f"),
             "is_payable": st.column_config.CheckboxColumn(L("Payable?", "भुगतान योग्य?")),
@@ -332,7 +332,7 @@ def render_estimate(pid, est, bill: HospitalBill, ctx: ClaimContext):
     with left:
         st.markdown(f"**{L('How we worked it out', 'हिसाब कैसे बना')}**")
         st.dataframe(pd.DataFrame([{
-            L("Step", "चरण"): (s.description_hi if lang() == "hi" and s.description_hi else s.description),
+            L("Step", "चरण"): L(s.description, s.description_hi or s.description),
             L("Deducted", "कटौती"): inr(s.deduction) if s.deduction else "—",
             L("Running total", "बची राशि"): inr(s.amount_after),
             L("Clause", "क्लॉज़"): ((s.clause_reference or "") + (f" (p.{s.source_page})" if s.source_page else "")).strip() or "—",
@@ -367,7 +367,7 @@ def render_estimate(pid, est, bill: HospitalBill, ctx: ClaimContext):
                         format_func=lambda m: L("Cashless (network hospital)", "कैशलेस (नेटवर्क अस्पताल)") if m == "cashless"
                         else L("Reimbursement (pay first, claim later)", "प्रतिपूर्ति (पहले भुगतान, बाद में क्लेम)"))
         for i, doc in enumerate(claim_documents(mode, bill)):
-            st.checkbox(doc["hi" if lang() == "hi" else "en"], key=f"cdoc_{mode}_{i}")
+            st.checkbox(bi(doc), key=f"cdoc_{mode}_{i}")
     if est.missing_information:
         note(L("Could not check: ", "जाँच नहीं हो सकी: ") + ", ".join(est.missing_information))
     with st.expander(L("Assumptions and policy clauses", "मान्यताएँ और पॉलिसी क्लॉज़")):

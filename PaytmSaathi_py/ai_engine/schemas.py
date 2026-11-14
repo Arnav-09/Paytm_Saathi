@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SourceLocation(BaseModel):
@@ -95,6 +95,19 @@ class Chunk(BaseModel):
     source_filename: str
 
 
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 365 / 12, "year": 365}
+
+
+def duration_to_days(text: str) -> Optional[int]:
+    """'30 days' -> 30, '24 months' -> 730, '2 years' -> 730, '3 yrs' -> 1095. None if unclear."""
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(days?|weeks?|months?|mths?|years?|yrs?)?", text or "", re.IGNORECASE)
+    if not match:
+        return None
+    number, unit = float(match.group(1)), (match.group(2) or "day").lower()
+    key = "year" if unit.startswith("y") else "month" if unit.startswith("m") else "week" if unit.startswith("w") else "day"
+    return int(round(number * _UNIT_DAYS[key]))
+
+
 class WaitingPeriodEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -113,11 +126,15 @@ class WaitingPeriodEntry(BaseModel):
         if isinstance(value, (int, float)):
             return int(value)
         if isinstance(value, str):
-            match = re.search(r"(\d+)\s*(day|days)?", value, re.IGNORECASE)
-            if match:
-                return int(match.group(1))
-            return None
+            return duration_to_days(value)
         return value
+
+    @model_validator(mode="after")
+    def _days_from_duration(self):
+        # LLMs often give "36 months" in `duration` but leave `duration_days` empty.
+        if self.duration_days is None and self.duration:
+            self.duration_days = duration_to_days(self.duration)
+        return self
 
 
 class ExclusionEntry(BaseModel):

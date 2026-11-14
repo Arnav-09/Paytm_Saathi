@@ -1,27 +1,39 @@
-"""Hindi (and English) language support.
+"""Language support: English plus Hindi, Marathi, Bengali, Tamil, Telugu and Gujarati.
 
-* Detects Hindi (Devanagari) questions so they can be answered in Hindi.
-* Translates answers/explanations with the configured LLM, under strict rules:
-  numbers, rupee amounts, clause numbers and ``[Source N]`` markers must survive
-  translation unchanged, otherwise the English original is kept.
-* Works offline: with the mock provider (or on LLM failure) a curated insurance /
-  lending / payments glossary and fixed phrases are used, so the app never shows
-  a mistranslated or fabricated sentence.
+* Detects the script of a message (Devanagari -> Hindi, Bengali, Gujarati, Tamil, Telugu).
+  Marathi shares Devanagari with Hindi, so it is only used when the user picks it.
+* Translates text with the configured LLM under strict rules: numbers, rupee amounts, clause
+  numbers and ``[Source N]`` markers must survive unchanged and the result must be in the target
+  script, otherwise the original text is kept. The offline mock model never fakes a translation.
+* Hindi has a curated glossary and fixed phrases that work with no AI model at all.
 
-The embedding model is English-only, so a Hindi question is translated to English
-*for retrieval only*; the original wording is preserved for the user.
+The embedding model is English-only, so a non-English question is translated to English *for
+retrieval only*; the user's original wording is always preserved.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Optional
 
 from .exceptions import LLMProviderError
 from .llm_provider import LLMProvider, MockLLMProvider
 from .utils import logger
 
-SUPPORTED_LANGUAGES = {"en": "English", "hi": "हिन्दी"}
+# code -> native name (shown in the language picker)
+SUPPORTED_LANGUAGES = {
+    "en": "English", "hi": "हिन्दी", "mr": "मराठी", "bn": "বাংলা", "ta": "தமிழ்", "te": "తెలుగు", "gu": "ગુજરાતી",
+}
+LANGUAGE_NAMES_EN = {
+    "en": "English", "hi": "Hindi", "mr": "Marathi", "bn": "Bengali", "ta": "Tamil", "te": "Telugu", "gu": "Gujarati",
+}
+# Unicode block of each language's script (Marathi and Hindi share Devanagari).
+_SCRIPTS = {
+    "hi": (0x0900, 0x097F), "mr": (0x0900, 0x097F), "bn": (0x0980, 0x09FF),
+    "gu": (0x0A80, 0x0AFF), "ta": (0x0B80, 0x0BFF), "te": (0x0C00, 0x0C7F),
+}
+_SCRIPT_TO_CODE = {(0x0900, 0x097F): "hi", (0x0980, 0x09FF): "bn", (0x0A80, 0x0AFF): "gu", (0x0B80, 0x0BFF): "ta", (0x0C00, 0x0C7F): "te"}
 
 INSUFFICIENT_EVIDENCE_EN = (
     "I could not find enough information in the uploaded policy to answer this reliably."
@@ -115,57 +127,81 @@ GLOSSARY_HI_EN: dict[str, str] = {
     "लिमिट": "limit",
 }
 
-_DEVANAGARI = re.compile(r"[\u0900-\u097F]")
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
-_SOURCE = re.compile(r"\[Source \d+\]")
-_DIGIT_MAP = str.maketrans("०१२३४५६७८९", "0123456789")
+_SOURCE = re.compile(r"\[Source \d+\]|\[[KP]\d+\]")
+
+
+# ---------------------------------------------------------------------------
+# Script detection and normalisation
+# ---------------------------------------------------------------------------
+def _script_fraction(text: str, block: tuple[int, int]) -> float:
+    letters = [c for c in (text or "") if c.isalpha() or unicodedata.category(c).startswith("M")]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if block[0] <= ord(c) <= block[1]) / len(letters)
 
 
 def contains_devanagari(text: str) -> bool:
-    return bool(text and _DEVANAGARI.search(text))
+    return any(0x0900 <= ord(c) <= 0x097F for c in (text or ""))
+
+
+def has_indic_script(text: str) -> bool:
+    return any(any(lo <= ord(c) <= hi for lo, hi in set(_SCRIPTS.values())) for c in (text or ""))
+
+
+def in_script(text: str, code: str) -> bool:
+    """True when the text is mostly written in ``code``'s script (always True for English)."""
+    if code not in _SCRIPTS:
+        return True
+    return _script_fraction(text, _SCRIPTS[code]) >= 0.3
 
 
 def detect_language(text: str) -> str:
-    """'hi' when the text is mostly Devanagari, else 'en'."""
-    if not text:
-        return "en"
-    letters = [c for c in text if c.isalpha()]
-    if not letters:
-        return "en"
-    deva = sum(1 for c in letters if _DEVANAGARI.match(c))
-    return "hi" if deva / len(letters) >= 0.3 else "en"
+    """Language code from the dominant script; Latin text is 'en'. Devanagari is reported as 'hi'."""
+    for block, code in _SCRIPT_TO_CODE.items():
+        if _script_fraction(text, block) >= 0.3:
+            return code
+    return "en"
 
 
 def normalize_language(language: Optional[str]) -> str:
+    """Accept a code ('hi'), an English name ('Hindi') or a native name ('हिन्दी')."""
     if not language:
         return "en"
     lowered = language.strip().lower()
-    if lowered in ("hi", "hindi", "हिन्दी", "हिंदी"):
+    if lowered in SUPPORTED_LANGUAGES:
+        return lowered
+    for code, native in SUPPORTED_LANGUAGES.items():
+        if lowered in (native.lower(), LANGUAGE_NAMES_EN[code].lower()):
+            return code
+    if lowered in ("हिंदी",):
         return "hi"
     return "en"
 
 
+def _ascii_digits(text: str) -> str:
+    """Convert digits of any script (०१२, ০১২, ௦௧௨ ...) to 0-9."""
+    return "".join(str(unicodedata.decimal(c)) if c.isdecimal() else c for c in text)
+
+
 def _normalized_numbers(text: str) -> list[str]:
-    text = text.translate(_DIGIT_MAP)
-    return sorted(n.replace(",", "") for n in _NUMBER.findall(text))
+    return sorted(n.replace(",", "") for n in _NUMBER.findall(_ascii_digits(text)))
 
 
 def _preserves_facts(original: str, translated: str) -> bool:
-    """Numbers and [Source N] markers must be identical after translation."""
+    """Numbers and citation markers must be identical after translation."""
     if _normalized_numbers(original) != _normalized_numbers(translated):
         return False
     return sorted(_SOURCE.findall(original)) == sorted(_SOURCE.findall(translated))
 
 
 def glossary_translate(text: str, target: str = "hi") -> str:
-    """Replace known terms only (offline). Unknown words are left untouched."""
+    """Replace known terms only (offline, Hindi<->English). Unknown words are left untouched."""
     table = GLOSSARY_EN_HI if target == "hi" else GLOSSARY_HI_EN
     result = text
     for term in sorted(table, key=len, reverse=True):
         if target == "hi":
-            result = re.sub(
-                rf"\b{re.escape(term)}\b", table[term], result, flags=re.IGNORECASE
-            )
+            result = re.sub(rf"\b{re.escape(term)}\b", table[term], result, flags=re.IGNORECASE)
         else:
             result = result.replace(term, table[term])
     return result
@@ -175,24 +211,28 @@ def _is_mock(llm: Optional[LLMProvider]) -> bool:
     return llm is None or isinstance(llm, MockLLMProvider)
 
 
+# ---------------------------------------------------------------------------
+# Translation
+# ---------------------------------------------------------------------------
 def translate_text(
     text: str, target: str, llm: Optional[LLMProvider] = None
 ) -> tuple[str, bool]:
-    """Translate ``text`` to ``target`` ('hi' or 'en').
+    """Translate ``text`` into ``target`` (any supported code, or 'en').
 
-    Returns (translated_text, was_translated). On any failure or fact mismatch the
+    Returns (translated_text, was_translated). On any failure, fact mismatch or wrong script the
     original text is returned with was_translated=False.
     """
     target = normalize_language(target)
     if not text or not text.strip():
         return text, False
-    if target == "hi":
-        if contains_devanagari(text):
-            return text, False  # already Hindi
-        if text.strip() == INSUFFICIENT_EVIDENCE_EN:
+    if target == "en":
+        if not has_indic_script(text):
+            return text, False  # already English
+    else:
+        if in_script(text, target) and has_indic_script(text) and target != "mr":
+            return text, False  # already in the target language
+        if target == "hi" and text.strip() == INSUFFICIENT_EVIDENCE_EN:
             return INSUFFICIENT_EVIDENCE_HI, True
-    elif not contains_devanagari(text):
-        return text, False  # already English
 
     if _is_mock(llm):
         return text, False  # never let a stub LLM "translate"
@@ -201,22 +241,23 @@ def translate_text(
         "You are a careful professional translator for Indian financial services. "
         "Translate faithfully. Never add, remove or change any information."
     )
-    if target == "hi":
-        prompt = (
-            "Translate the text below into simple, natural Hindi (Devanagari script). "
-            "Rules: keep all numbers, rupee amounts (₹), percentages, dates, clause "
-            "numbers and any [Source N] markers EXACTLY as written (use Western digits); "
-            "keep product/brand names like Paytm in English; do not add explanations.\n\n"
-            f"TEXT:\n{text}\n\nReturn only the Hindi translation."
-        )
-    else:
+    name = LANGUAGE_NAMES_EN[target]
+    if target == "en":
         prompt = (
             "Translate the text below into plain English. Keep all numbers, amounts "
             "and names exactly. Return only the translation.\n\n"
             f"TEXT:\n{text}"
         )
+    else:
+        prompt = (
+            f"Translate the text below into simple, natural {name} ({SUPPORTED_LANGUAGES[target]} script). "
+            "Rules: keep all numbers, rupee amounts (₹), percentages, dates, clause numbers and any "
+            "[Source N] / [K1] / [P1] markers EXACTLY as written (use Western digits 0-9); keep brand "
+            "names like Paytm, UPI, KYC, EMI, OTP in English letters; do not add explanations.\n\n"
+            f"TEXT:\n{text}\n\nReturn only the {name} translation."
+        )
     try:
-        translated = llm.generate(prompt, system_prompt=system, temperature=0.0, max_tokens=1500)  # type: ignore[union-attr]
+        translated = llm.generate(prompt, system_prompt=system, temperature=0.0, max_tokens=2500)  # type: ignore[union-attr]
     except LLMProviderError as exc:
         logger.warning("Translation failed, keeping original: %s", exc)
         return text, False
@@ -224,18 +265,17 @@ def translate_text(
     if not translated or not _preserves_facts(text, translated):
         logger.warning("Translation altered numbers/citations; keeping original text.")
         return text, False
-    if target == "hi" and not contains_devanagari(translated):
+    if target != "en" and not in_script(translated, target):
         return text, False
     return translated, True
 
 
 def question_to_english(question: str, llm: Optional[LLMProvider] = None) -> str:
-    """Translate a Hindi question to English for retrieval. English passes through."""
-    if not contains_devanagari(question):
+    """Translate a non-English question to English for retrieval. English passes through."""
+    if not has_indic_script(question):
         return question
     if not _is_mock(llm):
         translated, ok = translate_text(question, "en", llm)
         if ok:
             return translated
-    english = glossary_translate(question, "en")
-    return english
+    return glossary_translate(question, "en")  # offline Hindi fallback

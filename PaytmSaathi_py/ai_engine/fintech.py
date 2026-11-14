@@ -8,16 +8,31 @@ them with the provider.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import re
 import secrets
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from .exceptions import CalculationInputError, PaytmSaathiError
+from .exceptions import CalculationInputError, InvalidFileError, PaytmSaathiError
+from .guardrails import redact_sensitive
+from .linkcheck import (
+    LinkFinding,
+    PhoneFinding,
+    SenderFinding,
+    analyse_link,
+    analyse_phones,
+    analyse_sender,
+    detect_brands,
+    extract_urls,
+    load_blocklist,
+)
 from .utils import POLICIES_DIR, ensure_dir
 
 DISPUTES_DIR = str(Path(POLICIES_DIR).parent / "disputes")
@@ -315,6 +330,19 @@ def dispute_guidance(dispute_type: str, confidence: str = "high") -> DisputeGuid
         expected_timeline=d["timeline"], expected_timeline_hi=d["timeline_hi"])
 
 
+class Attachment(BaseModel):
+    """Evidence attached to a ticket: a screenshot/PDF, or pasted SMS text."""
+
+    attachment_id: str
+    kind: str  # screenshot | document | sms
+    filename: str
+    size: int = 0
+    sha256: str = ""
+    added_at: str
+    text: Optional[str] = None  # OCR text or pasted SMS, with credentials removed
+    hints: dict = Field(default_factory=dict)  # utr / amount / date found in the text
+
+
 class DisputeTicket(BaseModel):
     ticket_id: str
     dispute_type: str
@@ -325,6 +353,7 @@ class DisputeTicket(BaseModel):
     created_at: str
     transaction_date: Optional[str] = None  # YYYY-MM-DD, when the payment happened
     user_id: Optional[str] = None
+    attachments: list[Attachment] = Field(default_factory=list)
     guidance: DisputeGuidance
 
 
@@ -465,8 +494,7 @@ def draft_complaint(ticket: DisputeTicket, customer_name: str, recipient: str = 
                      "I request your intervention under the RBI Integrated Ombudsman Scheme.")
     if ticket.dispute_type == "unauthorized_fraud":
         lines.append("I did not authorise this transaction and have reported it to the cyber-crime helpline 1930.")
-    lines += ["", "Attached: screenshot of the transaction and the debit SMS/statement.", "",
-              "Regards,", customer_name or "[your name]"]
+    lines += [""] + _attachment_lines(ticket) + ["", "Regards,", customer_name or "[your name]"]
     if masked_mobile:
         lines.append(f"Registered mobile: {masked_mobile}")
     return "\n".join(lines)
@@ -482,6 +510,188 @@ def get_dispute_ticket(ticket_id: str, directory: Optional[str] = None) -> Dispu
 
 
 # ---------------------------------------------------------------------------
+# Evidence: screenshots, documents and pasted SMS attached to a ticket
+# ---------------------------------------------------------------------------
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_ATTACHMENTS = 6
+_MAGIC = {".png": (b"\x89PNG\r\n\x1a\n",), ".jpg": (b"\xff\xd8\xff",), ".jpeg": (b"\xff\xd8\xff",), ".pdf": (b"%PDF-",)}
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def _owned_ticket(ticket_id: str, user_id: str, directory: Optional[str]) -> DisputeTicket:
+    ticket = get_dispute_ticket(ticket_id, directory)
+    if not user_id or ticket.user_id != user_id:
+        raise PaytmSaathiError("Ticket not found: " + ticket_id, "ticket_not_found")  # don't reveal other users' tickets
+    return ticket
+
+
+def _save_ticket(ticket: DisputeTicket, directory: Optional[str]) -> None:
+    folder = ensure_dir(directory or DISPUTES_DIR)
+    (folder / f"{ticket.ticket_id}.json").write_text(ticket.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _attachment_dir(ticket_id: str, directory: Optional[str]) -> Path:
+    return ensure_dir(Path(directory or DISPUTES_DIR) / "attachments" / ticket_id)
+
+
+def extract_evidence_hints(text: str) -> dict:
+    """Pull the transaction reference, amount and date out of SMS / screenshot text."""
+    hints: dict = {}
+    utr = re.search(r"(?:utr|rrn|ref(?:erence)?(?:\s*no)?|txn(?:\s*id)?|transaction\s*(?:id|no))\W{0,6}(\d{9,16})", text, re.IGNORECASE)
+    if utr:
+        hints["utr"] = utr.group(1)
+    amount = re.search(r"(?:rs\.?|inr|₹)\s*([\d,]+(?:\.\d{1,2})?)", text, re.IGNORECASE)
+    if amount:
+        try:
+            hints["amount"] = float(amount.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    d = re.search(r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b", text)
+    if d:
+        day, month, year = int(d.group(1)), int(d.group(2)), int(d.group(3))
+        year += 2000 if year < 100 else 0
+        try:
+            hints["date"] = datetime(year, month, day).date().isoformat()
+        except ValueError:
+            pass
+    else:
+        d = re.search(r"\b(\d{1,2})[\s-]([A-Za-z]{3})[a-z]*[\s,-]+(\d{4})\b", text)
+        if d and d.group(2).lower() in _MONTHS:
+            try:
+                hints["date"] = datetime(int(d.group(3)), _MONTHS[d.group(2).lower()], int(d.group(1))).date().isoformat()
+            except ValueError:
+                pass
+    return hints
+
+
+def _safe_filename(name: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", Path(name or "file").name)[:80].strip("._") or "file"
+    return base
+
+
+def add_attachment(ticket_id: str, user_id: str, filename: str, data: bytes,
+                   directory: Optional[str] = None, run_ocr: bool = True) -> Attachment:
+    """Attach a screenshot (PNG/JPG) or PDF to the user's own ticket.
+
+    The file type is checked from its real content, not just the name; size and count are
+    limited; any text read from it (OCR) has OTPs/PINs/card numbers removed before it is saved.
+    """
+    ticket = _owned_ticket(ticket_id, user_id, directory)
+    if len(ticket.attachments) >= MAX_ATTACHMENTS:
+        raise InvalidFileError(f"A ticket can have at most {MAX_ATTACHMENTS} attachments.")
+    if not data:
+        raise InvalidFileError("The file is empty.")
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise InvalidFileError("The file is too large (limit 5 MB).")
+    name = _safe_filename(filename)
+    ext = Path(name).suffix.lower()
+    if ext not in _MAGIC or not any(data.startswith(sig) for sig in _MAGIC[ext]):
+        raise InvalidFileError("Only real PNG, JPG or PDF files can be attached.")
+
+    attachment_id = "A" + secrets.token_hex(4).upper()
+    (_attachment_dir(ticket_id, directory) / f"{attachment_id}{ext}").write_bytes(data)
+    text = None
+    if run_ocr:
+        try:
+            if ext == ".pdf":
+                import fitz  # PyMuPDF
+
+                with fitz.open(stream=data, filetype="pdf") as doc:
+                    text = "\n".join(page.get_text("text") for page in doc)[:6000]
+            else:
+                from .ocr import ocr_available, ocr_image_bytes
+
+                text = ocr_image_bytes(data)[:6000] if ocr_available() else None
+        except Exception:  # OCR is a convenience; the file is attached either way
+            text = None
+    if text:
+        text, _ = redact_sensitive(text)
+        text = text.strip()[:2000] or None
+    att = Attachment(attachment_id=attachment_id, kind="document" if ext == ".pdf" else "screenshot",
+                     filename=name, size=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                     added_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                     text=text, hints=extract_evidence_hints(text) if text else {})
+    ticket.attachments.append(att)
+    _save_ticket(ticket, directory)
+    return att
+
+
+def add_sms_text(ticket_id: str, user_id: str, text: str, directory: Optional[str] = None) -> Attachment:
+    """Attach the text of an SMS / message. OTPs, PINs and card numbers are removed first."""
+    ticket = _owned_ticket(ticket_id, user_id, directory)
+    if len(ticket.attachments) >= MAX_ATTACHMENTS:
+        raise InvalidFileError(f"A ticket can have at most {MAX_ATTACHMENTS} attachments.")
+    clean, _ = redact_sensitive((text or "").strip()[:2000])
+    if len(clean) < 5:
+        raise InvalidFileError("Paste the SMS text (at least a few words).")
+    att = Attachment(attachment_id="A" + secrets.token_hex(4).upper(), kind="sms", filename="sms.txt",
+                     size=len(clean.encode("utf-8")), sha256=hashlib.sha256(clean.encode("utf-8")).hexdigest(),
+                     added_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                     text=clean, hints=extract_evidence_hints(clean))
+    ticket.attachments.append(att)
+    _save_ticket(ticket, directory)
+    return att
+
+
+def remove_attachment(ticket_id: str, user_id: str, attachment_id: str, directory: Optional[str] = None) -> None:
+    ticket = _owned_ticket(ticket_id, user_id, directory)
+    keep = [a for a in ticket.attachments if a.attachment_id != attachment_id]
+    if len(keep) == len(ticket.attachments):
+        raise PaytmSaathiError("Attachment not found.", "attachment_not_found")
+    for path in _attachment_dir(ticket_id, directory).glob(f"{attachment_id}.*"):
+        path.unlink(missing_ok=True)
+    ticket.attachments = keep
+    _save_ticket(ticket, directory)
+
+
+def apply_hints_to_ticket(ticket_id: str, user_id: str, directory: Optional[str] = None) -> DisputeTicket:
+    """Fill empty transaction ID / amount / date on the ticket from what the evidence shows."""
+    ticket = _owned_ticket(ticket_id, user_id, directory)
+    for att in ticket.attachments:
+        h = att.hints
+        if not ticket.transaction_id and h.get("utr"):
+            ticket.transaction_id = str(h["utr"])
+        if not ticket.amount and h.get("amount"):
+            ticket.amount = float(h["amount"])
+        if not ticket.transaction_date and h.get("date"):
+            ticket.transaction_date = str(h["date"])
+    _save_ticket(ticket, directory)
+    return ticket
+
+
+def _attachment_lines(ticket: DisputeTicket) -> list[str]:
+    if not ticket.attachments:
+        return ["Attached: screenshot of the transaction and the debit SMS/statement (to be attached)."]
+    lines = ["Supporting evidence attached:"]
+    for i, a in enumerate(ticket.attachments, 1):
+        label = {"screenshot": "Screenshot", "document": "Document", "sms": "SMS received"}[a.kind]
+        lines.append(f"  {i}. {label}: {a.filename if a.kind != 'sms' else 'text below'} (added {a.added_at[:10]})")
+        if a.kind == "sms" and a.text:
+            lines.append("     \"" + " ".join(a.text.split())[:400] + "\"")
+    return lines
+
+
+def build_evidence_pack(ticket: DisputeTicket, customer_name: str, recipient: str = "app",
+                        masked_mobile: Optional[str] = None, directory: Optional[str] = None) -> bytes:
+    """A ZIP with the complaint letter, every attachment and an index with checksums."""
+    letter = draft_complaint(ticket, customer_name, recipient, masked_mobile)
+    index = [f"Evidence index for {ticket.ticket_id}", f"Created: {ticket.created_at}", ""]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"complaint_{recipient}.txt", letter)
+        folder = Path(directory or DISPUTES_DIR) / "attachments" / ticket.ticket_id
+        for a in ticket.attachments:
+            if a.kind == "sms":
+                zf.writestr(f"evidence/{a.attachment_id}_sms.txt", a.text or "")
+            else:
+                for path in folder.glob(f"{a.attachment_id}.*"):
+                    zf.write(path, f"evidence/{a.attachment_id}_{a.filename}")
+            index.append(f"{a.attachment_id}  {a.kind:<10} {a.filename:<30} sha256={a.sha256[:16]}...  added {a.added_at}")
+        zf.writestr("evidence_index.txt", "\n".join(index))
+    return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # Scam / phishing check
 # ---------------------------------------------------------------------------
 _SCAM_RULES: list[tuple[str, int, str, str]] = [
@@ -492,11 +702,9 @@ _SCAM_RULES: list[tuple[str, int, str, str]] = [
     (r"(urgent|immediately|within \d+ (hours?|minutes?)|last chance|today only|अभी|तुरंत|जल्दी)", 2, "Creates false urgency", "झूठी जल्दबाज़ी बनाता है"),
     (r"(lottery|lucky draw|you (have )?won|prize|cashback of|reward of|जीत|इनाम|लॉटरी)", 3, "Promises a prize or unexpected reward", "इनाम या अनपेक्षित पैसे का वादा करता है"),
     (r"(collect request|enter (your )?upi pin to receive|receive money.{0,30}pin|पैसे पाने.{0,20}पिन)", 4, "Asks for a UPI PIN to 'receive' money (you never need a PIN to receive)", "पैसे 'पाने' के लिए पिन माँगता है (पैसे पाने के लिए पिन कभी नहीं लगता)"),
-    (r"(bit\.ly|tinyurl|t\.co|goo\.gl|cutt\.ly|rb\.gy|is\.gd)/", 2, "Contains a shortened link that hides the real site", "छोटा लिंक है जो असली साइट छिपाता है"),
-    (r"https?://[^\s]*\.(xyz|top|click|link|work|loan|info)\b", 2, "Link to a suspicious domain", "संदिग्ध डोमेन का लिंक"),
     (r"(registration fee|processing fee|advance fee|pay.{0,20}to (release|unlock|get) (loan|refund|prize))", 3, "Asks for an upfront fee to release a loan/refund/prize", "लोन/रिफंड/इनाम पाने के लिए पहले शुल्क माँगता है"),
-    (r"(customer care|support|bank).{0,30}(\+?\d[\d\s-]{9,})", 1, "Gives a personal phone number as 'official support'", "'आधिकारिक सपोर्ट' के नाम पर निजी नंबर देता है"),
     (r"(refund|reversal).{0,40}(click|link|http)", 2, "Refund that needs you to click a link", "रिफंड के लिए लिंक पर क्लिक करने को कहता है"),
+    # Links, phone numbers and the sender are analysed separately (see linkcheck.py).
 ]
 
 
@@ -508,11 +716,15 @@ class ScamAssessment(BaseModel):
     advice: list[str]
     advice_hi: list[str]
     spans: list[tuple[int, int]] = Field(default_factory=list)  # risky phrases to highlight
+    links: list[LinkFinding] = Field(default_factory=list)
+    phones: list[PhoneFinding] = Field(default_factory=list)
+    sender: Optional[SenderFinding] = None
+    claimed_brands: list[str] = Field(default_factory=list)
     disclaimer: str = "Automated pattern check; it can miss new scams. When in doubt, do not pay or share anything."
 
 
-def check_scam_message(text: str) -> ScamAssessment:
-    """Pattern-based risk check of an SMS/WhatsApp/call script."""
+def check_scam_message(text: str, sender: Optional[str] = None) -> ScamAssessment:
+    """Risk check of an SMS/WhatsApp/call script: wording, links, phone numbers and sender."""
     if not text or not text.strip():
         raise CalculationInputError("Paste the message you received.")
     score, reasons, reasons_hi, spans = 0, [], [], []
@@ -523,6 +735,29 @@ def check_scam_message(text: str) -> ScamAssessment:
             reasons.append(en)
             reasons_hi.append(hi)
             spans += [(m.start(), m.end()) for m in matches if m.end() > m.start()]
+
+    brands = detect_brands(text)
+    blocklist = load_blocklist()
+    links = [analyse_link(u, brands, blocklist) for u in extract_urls(text)[:8]]
+    for link in links:
+        if link.verdict in ("dangerous", "suspicious"):
+            score += 5 if link.verdict == "dangerous" else 2
+            reasons.append(f"Link {link.domain or link.url}: {link.reasons[0]}")
+            reasons_hi.append(f"लिंक {link.domain or link.url}: {link.reasons_hi[0]}")
+            for m in re.finditer(re.escape(link.url), text, re.IGNORECASE):
+                spans.append((m.start(), m.end()))
+    phones = analyse_phones(text)
+    for ph in phones:
+        if ph.verdict == "suspicious":
+            score += 2
+            reasons.append(ph.note)
+            reasons_hi.append(ph.note_hi)
+    sender_finding = analyse_sender(sender or "", brands)
+    if sender_finding and sender_finding.verdict in ("suspicious", "mismatch"):
+        score += 3 if sender_finding.verdict == "suspicious" else 2
+        reasons.append(sender_finding.note)
+        reasons_hi.append(sender_finding.note_hi)
+
     if re.search(r"(do not|don.t|never)\s+share", text, re.IGNORECASE):
         score = max(score - 3, 0)  # genuine OTP SMS warn the reader not to share
     risk = "high" if score >= 5 else "medium" if score >= 2 else "low"
@@ -536,6 +771,9 @@ def check_scam_message(text: str) -> ScamAssessment:
         advice_hi = ["इस संदेश के लिंक पर क्लिक न करें, ओटीपी/पिन न बताएँ और कोई ऐप इंस्टॉल न करें।",
                      "आधिकारिक ऐप या कार्ड/स्टेटमेंट पर छपे नंबर से पुष्टि करें।",
                      "अगर आप जानकारी बता चुके हैं या पैसे भेज दिए हैं, तुरंत 1930 पर कॉल करें और खाते ब्लॉक करें।"]
+    if risk != "low":
+        advice.append("Report it: forward the details on the Sanchar Saathi 'Chakshu' page (sancharsaathi.gov.in) and at cybercrime.gov.in.")
+        advice_hi.append("रिपोर्ट करें: ब्योरा संचार साथी के 'चक्षु' पेज (sancharsaathi.gov.in) और cybercrime.gov.in पर दें।")
     merged: list[tuple[int, int]] = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
@@ -543,4 +781,5 @@ def check_scam_message(text: str) -> ScamAssessment:
         else:
             merged.append((start, end))
     return ScamAssessment(risk=risk, score=score, reasons=reasons, reasons_hi=reasons_hi,
-                          advice=advice, advice_hi=advice_hi, spans=merged)
+                          advice=advice, advice_hi=advice_hi, spans=merged, links=links, phones=phones,
+                          sender=sender_finding, claimed_brands=brands)
