@@ -20,7 +20,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from .exceptions import CalculationInputError, InvalidFileError, PaytmSaathiError
+from .exceptions import CalculationInputError, EvidenceRejectedError, InvalidFileError, PaytmSaathiError
 from .guardrails import redact_sensitive
 from .linkcheck import (
     LinkFinding,
@@ -341,6 +341,8 @@ class Attachment(BaseModel):
     added_at: str
     text: Optional[str] = None  # OCR text or pasted SMS, with credentials removed
     hints: dict = Field(default_factory=dict)  # utr / amount / date found in the text
+    verified: bool = False  # passed the transaction-ID / name / date checks
+    checks: list[str] = Field(default_factory=list)  # which checks passed
 
 
 class DisputeTicket(BaseModel):
@@ -366,6 +368,8 @@ def create_dispute_ticket(description: str, amount: Optional[float] = None,
     """Classify (unless a type is given), build guidance and save a local ticket record."""
     if amount is not None and amount < 0:
         raise CalculationInputError("Amount cannot be negative.")
+    if transaction_id:
+        transaction_id = validate_transaction_id(transaction_id)
     if dispute_type:
         kind, confidence = dispute_type, "high"
     else:
@@ -546,7 +550,8 @@ def extract_evidence_hints(text: str) -> dict:
             hints["amount"] = float(amount.group(1).replace(",", ""))
         except ValueError:
             pass
-    d = re.search(r"\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b", text)
+    # No \b: OCR often glues words together ("on01/11/2026to"), so only require non-digits around it.
+    d = re.search(r"(?<!\d)(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4}|\d{2})(?!\d)", text)
     if d:
         day, month, year = int(d.group(1)), int(d.group(2)), int(d.group(3))
         year += 2000 if year < 100 else 0
@@ -569,12 +574,175 @@ def _safe_filename(name: str) -> str:
     return base
 
 
-def add_attachment(ticket_id: str, user_id: str, filename: str, data: bytes,
-                   directory: Optional[str] = None, run_ocr: bool = True) -> Attachment:
-    """Attach a screenshot (PNG/JPG) or PDF to the user's own ticket.
+# ---------------------------------------------------------------------------
+# Evidence verification: does the SMS / screenshot belong to THIS ticket and THIS user?
+# ---------------------------------------------------------------------------
+_TXN_FORMAT = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{4,28}[A-Za-z0-9]")
+# Letters OCR commonly reads instead of digits (only applied when the ID is all digits).
+_OCR_DIGIT_FIX = str.maketrans({"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "S": "5", "B": "8", "Z": "2", "G": "6"})
+_TXN_LABELLED = re.compile(
+    r"(?:utr|rrn|upi\s*ref(?:erence)?|ref(?:erence)?|txn|transaction)\s*(?:no\.?|number|id|#)?\s*[:.\-]?\s*([A-Za-z0-9]{6,30})",
+    re.IGNORECASE)
+_DATE_PATTERNS = [
+    r"(?<!\d)\d{1,2}[/\-.]\d{1,2}[/\-.](?:\d{4}|\d{2})(?!\d)",                    # 01/11/2026, 01-11-26
+    r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)",                                              # 2026-11-01
+    r"(?<!\d)\d{1,2}[\s\-]?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[\s\-,]*(?:\d{4}|\d{2})(?!\d)",  # 01 Nov 2026, 01-Nov-26
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4}",  # Nov 1, 2026
+]
+_DATE_RE = re.compile("|".join(_DATE_PATTERNS), re.IGNORECASE)
+_TIME_RE = re.compile(r"(?<!\d)\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|hrs?)?", re.IGNORECASE)
 
-    The file type is checked from its real content, not just the name; size and count are
-    limited; any text read from it (OCR) has OTPs/PINs/card numbers removed before it is saved.
+
+def normalise_txn_id(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (value or "").upper())
+
+
+def validate_transaction_id(value: str) -> str:
+    """Return the cleaned ID or raise. UTRs are 12 digits; wallets/apps use letters too."""
+    value = (value or "").strip()
+    if not _TXN_FORMAT.fullmatch(value):
+        raise CalculationInputError("Enter the transaction ID / UTR exactly as shown (6-30 letters or digits).")
+    return value
+
+
+def txn_id_in_text(txn_id: str, text: str) -> bool:
+    """True if the ticket's transaction ID appears in the text (spaces/punctuation and OCR slips ignored)."""
+    want, hay = normalise_txn_id(txn_id), normalise_txn_id(text)
+    if len(want) < 6 or not hay:
+        return False
+    if want in hay:
+        return True
+    return want.isdigit() and want in hay.translate(_OCR_DIGIT_FIX)
+
+
+def find_txn_ids(text: str) -> list[str]:
+    """Transaction IDs that are labelled as such (UTR / Ref No / Txn ID ...) in the text."""
+    return [m.group(1) for m in _TXN_LABELLED.finditer(text or "") if re.search(r"\d", m.group(1))]
+
+
+def has_timestamp(text: str) -> bool:
+    return bool(_DATE_RE.search(text or ""))
+
+
+def name_in_text(full_name: str, text: str) -> tuple[bool, list[str]]:
+    """Every part of the user's name (3+ letters) must appear; one OCR slip allowed in long parts."""
+    from .linkcheck import _edit_distance
+
+    parts = [normalise_txn_id(p) for p in (full_name or "").split()]
+    parts = [p for p in parts if len(p) >= 3] or [p for p in parts if p]
+    hay = normalise_txn_id(text)
+    missing = []
+    for part in parts:
+        if part in hay:
+            continue
+        n = len(part)
+        if n >= 5 and any(_edit_distance(hay[i:i + n], part, cap=1) <= 1 for i in range(max(len(hay) - n + 1, 0))):
+            continue
+        missing.append(part.title())
+    return (bool(parts) and not missing), missing
+
+
+def _txn_reasons(ticket: DisputeTicket, text: str, what: str, what_hi: str) -> tuple[list[str], list[str], list[str]]:
+    """(reasons_en, reasons_hi, passed_checks) for the transaction-ID check."""
+    if txn_id_in_text(ticket.transaction_id or "", text):
+        return [], [], [f"Transaction ID {ticket.transaction_id} matches"]
+    found = [f for f in find_txn_ids(text) if normalise_txn_id(f) != normalise_txn_id(ticket.transaction_id or "")]
+    if found:
+        return ([f"The transaction ID in this {what} ({found[0]}) does not match your ticket ({ticket.transaction_id})."],
+                [f"इस {what_hi} में लेन-देन आईडी ({found[0]}) आपके टिकट ({ticket.transaction_id}) से मेल नहीं खाती।"], [])
+    return ([f"This {what} does not show your transaction ID {ticket.transaction_id}."],
+            [f"इस {what_hi} में आपकी लेन-देन आईडी {ticket.transaction_id} नहीं दिखती।"], [])
+
+
+def verify_sms(ticket: DisputeTicket, text: str) -> list[str]:
+    """SMS must contain a date/time and the ticket's transaction ID. Raises EvidenceRejectedError; returns passed checks."""
+    reasons, reasons_hi, passed = [], [], []
+    if has_timestamp(text):
+        passed.append("Date/time found" if _TIME_RE.search(text) else "Date found")
+    else:
+        reasons.append("The SMS must include the transaction date (and time, if shown).")
+        reasons_hi.append("एसएमएस में लेन-देन की तारीख (और समय, यदि हो) होनी चाहिए।")
+    r, rh, p = _txn_reasons(ticket, text, "SMS", "एसएमएस")
+    reasons, reasons_hi, passed = reasons + r, reasons_hi + rh, passed + p
+    if reasons:
+        raise EvidenceRejectedError(reasons, reasons_hi)
+    return passed
+
+
+def verify_document(ticket: DisputeTicket, text: Optional[str], full_name: str, kind: str) -> list[str]:
+    """Screenshot/PDF must show the ticket's transaction ID and the user's name."""
+    what, what_hi = ("screenshot", "स्क्रीनशॉट") if kind == "screenshot" else ("document", "दस्तावेज़")
+    if not text or not text.strip():
+        raise EvidenceRejectedError(
+            [f"We could not read any text in this {what}, so we can't confirm it is yours. Upload a clearer image."],
+            [f"इस {what_hi} का कोई टेक्स्ट पढ़ा नहीं जा सका, इसलिए पुष्टि नहीं हो सकती। साफ़ तस्वीर अपलोड करें।"])
+    reasons, reasons_hi, passed = _txn_reasons(ticket, text, what, what_hi)
+    ok, missing = name_in_text(full_name, text)
+    if ok:
+        passed.append("Your name matches")
+    else:
+        reasons.append(f"This {what} does not show your name ({full_name}); missing: {', '.join(missing) or full_name}.")
+        reasons_hi.append(f"इस {what_hi} में आपका नाम ({full_name}) नहीं दिखता।")
+    if reasons:
+        raise EvidenceRejectedError(reasons, reasons_hi)
+    return passed
+
+
+def _require_txn(ticket: DisputeTicket) -> None:
+    if not ticket.transaction_id:
+        raise EvidenceRejectedError(
+            ["Add the transaction ID to this ticket first - evidence is checked against it."],
+            ["पहले इस टिकट में लेन-देन आईडी जोड़ें - सबूत की जाँच उसी से होती है।"])
+
+
+def set_transaction_id(ticket_id: str, user_id: str, transaction_id: str, directory: Optional[str] = None) -> DisputeTicket:
+    """Add the transaction ID to an older ticket. Not allowed once evidence was checked against another ID."""
+    ticket = _owned_ticket(ticket_id, user_id, directory)
+    value = validate_transaction_id(transaction_id)
+    if ticket.attachments and normalise_txn_id(value) != normalise_txn_id(ticket.transaction_id or ""):
+        raise CalculationInputError("This ticket already has evidence checked against its transaction ID; create a new ticket instead.")
+    ticket.transaction_id = value
+    _save_ticket(ticket, directory)
+    return ticket
+
+
+def _read_document_text(ext: str, data: bytes) -> Optional[str]:
+    """Text from a PDF (text layer) or an image (OCR). None when it cannot be read."""
+    try:
+        if ext == ".pdf":
+            import fitz  # PyMuPDF
+
+            with fitz.open(stream=data, filetype="pdf") as doc:
+                text = "\n".join(page.get_text("text") for page in doc)
+            if text.strip():
+                return text[:6000]
+            from .ocr import ocr_available, ocr_pdf_pages  # scanned PDF
+
+            if not ocr_available():
+                return None
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(data)
+            try:
+                return "\n".join(t for _, t in ocr_pdf_pages(tmp.name))[:6000]
+            finally:
+                Path(tmp.name).unlink(missing_ok=True)
+        from .ocr import ocr_available, ocr_image_bytes
+
+        return ocr_image_bytes(data)[:6000] if ocr_available() else None
+    except Exception:
+        return None
+
+
+def add_attachment(ticket_id: str, user_id: str, filename: str, data: bytes,
+                   directory: Optional[str] = None, expected_name: Optional[str] = None) -> Attachment:
+    """Attach a screenshot (PNG/JPG) or PDF to the user's own ticket, after verifying it.
+
+    1. The file type is checked from its real content; size and count are limited.
+    2. Its text is read (PDF text layer or OCR) and must show the ticket's transaction ID AND the
+       user's registered name - otherwise it is rejected (EvidenceRejectedError).
+    3. Only then is it saved; OTPs/PINs/card numbers are removed from the stored text.
     """
     ticket = _owned_ticket(ticket_id, user_id, directory)
     if len(ticket.attachments) >= MAX_ATTACHMENTS:
@@ -587,47 +755,48 @@ def add_attachment(ticket_id: str, user_id: str, filename: str, data: bytes,
     ext = Path(name).suffix.lower()
     if ext not in _MAGIC or not any(data.startswith(sig) for sig in _MAGIC[ext]):
         raise InvalidFileError("Only real PNG, JPG or PDF files can be attached.")
+    _require_txn(ticket)
+    if expected_name is None:
+        from .accounts import get_user
+
+        user = get_user(user_id)
+        expected_name = user.full_name if user else ""
+    kind = "document" if ext == ".pdf" else "screenshot"
+
+    raw_text = _read_document_text(ext, data)
+    checks = verify_document(ticket, raw_text, expected_name, kind)  # raises if it doesn't match
 
     attachment_id = "A" + secrets.token_hex(4).upper()
     (_attachment_dir(ticket_id, directory) / f"{attachment_id}{ext}").write_bytes(data)
-    text = None
-    if run_ocr:
-        try:
-            if ext == ".pdf":
-                import fitz  # PyMuPDF
-
-                with fitz.open(stream=data, filetype="pdf") as doc:
-                    text = "\n".join(page.get_text("text") for page in doc)[:6000]
-            else:
-                from .ocr import ocr_available, ocr_image_bytes
-
-                text = ocr_image_bytes(data)[:6000] if ocr_available() else None
-        except Exception:  # OCR is a convenience; the file is attached either way
-            text = None
-    if text:
-        text, _ = redact_sensitive(text)
-        text = text.strip()[:2000] or None
-    att = Attachment(attachment_id=attachment_id, kind="document" if ext == ".pdf" else "screenshot",
-                     filename=name, size=len(data), sha256=hashlib.sha256(data).hexdigest(),
+    text, _ = redact_sensitive(raw_text or "")
+    text = text.strip()[:2000] or None
+    att = Attachment(attachment_id=attachment_id, kind=kind, filename=name, size=len(data),
+                     sha256=hashlib.sha256(data).hexdigest(),
                      added_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                     text=text, hints=extract_evidence_hints(text) if text else {})
+                     text=text, hints=extract_evidence_hints(raw_text or ""), verified=True, checks=checks)
     ticket.attachments.append(att)
     _save_ticket(ticket, directory)
     return att
 
 
 def add_sms_text(ticket_id: str, user_id: str, text: str, directory: Optional[str] = None) -> Attachment:
-    """Attach the text of an SMS / message. OTPs, PINs and card numbers are removed first."""
+    """Attach the text of an SMS after verifying it has a date/time and the ticket's transaction ID.
+
+    OTPs, PINs and card numbers are removed before it is saved.
+    """
     ticket = _owned_ticket(ticket_id, user_id, directory)
     if len(ticket.attachments) >= MAX_ATTACHMENTS:
         raise InvalidFileError(f"A ticket can have at most {MAX_ATTACHMENTS} attachments.")
-    clean, _ = redact_sensitive((text or "").strip()[:2000])
-    if len(clean) < 5:
+    raw = (text or "").strip()[:2000]
+    if len(raw) < 5:
         raise InvalidFileError("Paste the SMS text (at least a few words).")
+    _require_txn(ticket)
+    checks = verify_sms(ticket, raw)  # raises if date or matching transaction ID is missing
+    clean, _ = redact_sensitive(raw)
     att = Attachment(attachment_id="A" + secrets.token_hex(4).upper(), kind="sms", filename="sms.txt",
                      size=len(clean.encode("utf-8")), sha256=hashlib.sha256(clean.encode("utf-8")).hexdigest(),
                      added_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                     text=clean, hints=extract_evidence_hints(clean))
+                     text=clean, hints=extract_evidence_hints(raw), verified=True, checks=checks)
     ticket.attachments.append(att)
     _save_ticket(ticket, directory)
     return att
@@ -665,7 +834,8 @@ def _attachment_lines(ticket: DisputeTicket) -> list[str]:
     lines = ["Supporting evidence attached:"]
     for i, a in enumerate(ticket.attachments, 1):
         label = {"screenshot": "Screenshot", "document": "Document", "sms": "SMS received"}[a.kind]
-        lines.append(f"  {i}. {label}: {a.filename if a.kind != 'sms' else 'text below'} (added {a.added_at[:10]})")
+        verified = f"; checked: {', '.join(a.checks)}" if a.verified and a.checks else ""
+        lines.append(f"  {i}. {label}: {a.filename if a.kind != 'sms' else 'text below'} (added {a.added_at[:10]}{verified})")
         if a.kind == "sms" and a.text:
             lines.append("     \"" + " ".join(a.text.split())[:400] + "\"")
     return lines

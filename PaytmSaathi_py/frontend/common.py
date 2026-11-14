@@ -106,7 +106,13 @@ def run(fn, *args, **kwargs):
     except accounts.AccountError as exc:
         st.error(exc.message_hi if lang() == "hi" else (exc.message if lang() == "en" else tr(exc.message, lang())))
     except PaytmSaathiError as exc:
-        st.error(exc.message)
+        reasons = getattr(exc, "reasons", None)
+        if reasons:  # evidence rejected: list every reason clearly
+            items = getattr(exc, "reasons_hi", reasons) if lang() == "hi" else [tr(r, lang()) for r in reasons]
+            st.error(L("❌ Not accepted:", "❌ स्वीकार नहीं हुआ:") + "\n\n" + "\n".join(f"- {r}" for r in items))
+        else:
+            hi = getattr(exc, "message_hi", None)
+            st.error(hi if (lang() == "hi" and hi) else (exc.message if lang() in ("en", "hi") else tr(exc.message, lang())))
     except Exception as exc:  # unexpected: still no raw traceback for the user
         st.error(L(f"Something went wrong: {exc}", f"कुछ गड़बड़ हो गई: {exc}"))
     return None

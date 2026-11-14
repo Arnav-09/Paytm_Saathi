@@ -52,12 +52,28 @@ def _ticket_detail(ticket: fintech.DisputeTicket, key: str) -> None:
 def _evidence(ticket: fintech.DisputeTicket, key: str) -> None:
     """Attach screenshots / SMS text; they are included in the complaint and the evidence pack."""
     st.markdown(f"**{L('📎 Evidence', '📎 सबूत')}**")
-    st.caption(L("Attach a screenshot of the payment or debit SMS. Saathi reads it, hides any OTP/PIN, and adds it to your complaint.",
-                 "पेमेंट या डेबिट एसएमएस का स्क्रीनशॉट जोड़ें। साथी उसे पढ़ता है, ओटीपी/पिन छिपा देता है और आपकी शिकायत में जोड़ देता है।"))
+    user = current_user()
+    name = user.full_name if user else ""
+    if not ticket.transaction_id:
+        st.warning(L("Add the transaction ID / UTR to this ticket first. Every SMS and screenshot is checked against it.",
+                     "पहले इस टिकट में लेन-देन आईडी / यूटीआर जोड़ें। हर एसएमएस और स्क्रीनशॉट की जाँच उसी से होती है।"))
+        c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+        txn = c1.text_input(L("Transaction ID / UTR", "लेन-देन आईडी / यूटीआर"), key=f"settxn_{key}")
+        if c2.button(L("Save", "सेव करें"), key=f"settxn_btn_{key}", disabled=not txn.strip()):
+            if run(fintech.set_transaction_id, ticket.ticket_id, uid(), txn):
+                st.rerun()
+        return
+    st.caption(L(f"Evidence is accepted only if it belongs to this payment. An SMS must show the date and the transaction ID "
+                 f"{ticket.transaction_id}. A screenshot or PDF must show the transaction ID {ticket.transaction_id} and your name "
+                 f"({name}). OTPs and PINs are hidden automatically.",
+                 f"सबूत तभी स्वीकार होगा जब वह इसी पेमेंट का हो। एसएमएस में तारीख और लेन-देन आईडी {ticket.transaction_id} होनी चाहिए। "
+                 f"स्क्रीनशॉट या PDF में लेन-देन आईडी {ticket.transaction_id} और आपका नाम ({name}) दिखना चाहिए। ओटीपी और पिन अपने-आप छिप जाते हैं।"))
     for att in ticket.attachments:
         c1, c2 = st.columns([5, 1], vertical_alignment="center")
         icon = {"screenshot": "🖼️", "document": "📄", "sms": "💬"}[att.kind]
         c1.markdown(f"{icon} **{att.filename}** · {att.added_at[:10]}" + (f" · {att.size // 1024} KB" if att.kind != "sms" else ""))
+        if att.verified:
+            c1.markdown(" ".join(f'<span class="ps-pill ps-ok">✓ {L(c, c)}</span>' for c in att.checks), unsafe_allow_html=True)
         if att.text:
             c1.caption((att.text[:160] + "…") if len(att.text) > 160 else att.text)
         if c2.button("🗑️", key=f"rm_{key}_{att.attachment_id}", help=L("Remove", "हटाएँ")):
@@ -77,7 +93,9 @@ def _evidence(ticket: fintech.DisputeTicket, key: str) -> None:
         up = st.file_uploader(L("Screenshot or PDF (PNG, JPG, PDF · up to 5 MB)", "स्क्रीनशॉट या PDF (PNG, JPG, PDF · 5 MB तक)"),
                               type=["png", "jpg", "jpeg", "pdf"], key=f"up_{key}_{len(ticket.attachments)}")
         if up is not None and st.button(L("Attach file", "फ़ाइल जोड़ें"), key=f"att_{key}"):
-            if run(fintech.add_attachment, ticket.ticket_id, uid(), up.name, up.getvalue()):
+            with st.spinner(L("Reading and checking the file…", "फ़ाइल पढ़ी और जाँची जा रही है…")):
+                added = run(fintech.add_attachment, ticket.ticket_id, uid(), up.name, up.getvalue(), None, name)
+            if added:
                 st.rerun()
         with st.popover(L("💬 Paste SMS text instead", "💬 इसके बजाय एसएमएस टेक्स्ट पेस्ट करें")):
             sms = st.text_area(L("SMS text", "एसएमएस टेक्स्ट"), key=f"sms_{key}_{len(ticket.attachments)}", height=100)
@@ -92,12 +110,17 @@ def tab_dispute():
                             placeholder=L("e.g. ₹2,000 was deducted but the payment to the shop failed", "जैसे: ₹2,000 कट गए पर दुकान को पेमेंट फेल हो गया"))
         a, b, c = st.columns(3)
         amount = a.number_input(L("Amount (₹)", "राशि (₹)"), 0.0, 10000000.0, 0.0)
-        txn = b.text_input(L("Transaction ID / UTR", "लेन-देन आईडी / यूटीआर"))
+        txn = b.text_input(L("Transaction ID / UTR *", "लेन-देन आईडी / यूटीआर *"),
+                           help=L("Required. Find it in your payment app or debit SMS (UTR / UPI Ref No / Txn ID).",
+                                  "ज़रूरी। यह आपके पेमेंट ऐप या डेबिट एसएमएस में मिलेगा (UTR / UPI Ref No / Txn ID)।"))
         when = c.date_input(L("Date of payment", "पेमेंट की तारीख"), value=date.today(), max_value=date.today(), format="DD/MM/YYYY")
         go = st.form_submit_button(L("Get help and create ticket", "मदद लें और टिकट बनाएँ"), type="primary")
     if go:
         if not desc.strip():
             st.error(L("Tell us what happened.", "बताइए क्या हुआ।"))
+        elif not txn.strip():
+            st.error(L("Enter the transaction ID / UTR - your evidence will be checked against it.",
+                       "लेन-देन आईडी / यूटीआर दर्ज करें - आपके सबूत की जाँच उसी से होगी।"))
         else:
             ticket = run(fintech.create_dispute_ticket, desc, amount or None, txn or None, None, None, uid(), when.isoformat())
             if ticket:
