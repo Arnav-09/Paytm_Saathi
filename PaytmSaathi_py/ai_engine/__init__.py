@@ -16,7 +16,15 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .bill_extractor import extract_bill, extract_bill_from_text, parse_bill_text
 from .document_processor import extract_pdf_pages
+from .language import (
+    detect_language,
+    normalize_language,
+    question_to_english,
+    translate_text,
+)
+from .payout_calculator import estimate_payout
 from .embeddings import get_embedding_model
 from .exceptions import (
     EmptyPDFError,
@@ -40,6 +48,7 @@ from .llm_provider import (
 )
 from .policy_extractor import (
     PolicyExtractor,
+    list_policy_ids,
     load_policy_details,
     save_policy_details,
 )
@@ -66,6 +75,9 @@ from .schemas import (
     ExclusionEntry,
     MoneyValue,
     PageContent,
+    ClaimContext,
+    HospitalBill,
+    PayoutEstimate,
     PolicyDetails,
     RAGResponse,
     SimpleExplanation,
@@ -81,7 +93,13 @@ __all__ = [
     "ask_policy_question",
     "get_policy_details",
     "explain_policy_clause",
+    "explain_clause_text",
     "get_claim_relevant_clauses",
+    "extract_hospital_bill",
+    "estimate_claim_payout",
+    "list_policy_ids",
+    "translate_text",
+    "detect_language",
     "extract_pdf_pages",
     "chunk_pages",
     "get_embedding_model",
@@ -169,10 +187,28 @@ def process_policy(pdf_path: str, policy_id: str) -> PolicyDetails:
 
 
 def ask_policy_question(
-    policy_id: str, question: str, conversation_id: Optional[str] = None
+    policy_id: str,
+    question: str,
+    conversation_id: Optional[str] = None,
+    language: Optional[str] = None,
 ) -> RAGResponse:
-    """Answer a question about a policy, with citations and conversation context."""
-    return _get_engine().ask(policy_id, question, conversation_id)
+    """Answer a question about a policy, with citations and conversation context.
+
+    ``language`` is "en" or "hi". When omitted it is detected from the question, so a
+    Hindi question gets a Hindi answer. Retrieval always runs in English; citations keep
+    the policy's original wording. If translation cannot be done safely (numbers or
+    citations would change) the English answer is returned with ``language="en"``.
+    """
+    engine = _get_engine()
+    target = normalize_language(language) if language else detect_language(question)
+    english_question = question_to_english(question, engine.llm) if target == "hi" else question
+    response = engine.ask(policy_id, english_question, conversation_id)
+    response.question = question  # echo what the user actually typed
+    if target == "hi":
+        translated, ok = translate_text(response.answer, "hi", engine.llm)
+        if ok:
+            response.answer_en, response.answer, response.language = response.answer, translated, "hi"
+    return response
 
 
 def get_policy_details(policy_id: str) -> PolicyDetails:
@@ -180,9 +216,17 @@ def get_policy_details(policy_id: str) -> PolicyDetails:
     return load_policy_details(policy_id)
 
 
-def explain_policy_clause(policy_id: str, clause_reference: str) -> SimpleExplanation:
-    """Retrieve a clause and explain it in simple language."""
-    return _get_engine().explain_policy_clause(policy_id, clause_reference)
+def explain_policy_clause(
+    policy_id: str, clause_reference: str, language: Optional[str] = "en"
+) -> SimpleExplanation:
+    """Retrieve a clause and explain it in simple language (English or Hindi)."""
+    engine = _get_engine()
+    result = engine.explain_policy_clause(policy_id, clause_reference)
+    if normalize_language(language) == "hi":
+        translated, ok = translate_text(result.simple_explanation, "hi", engine.llm)
+        if ok:
+            result.simple_explanation, result.language = translated, "hi"
+    return result
 
 
 def get_claim_relevant_clauses(
@@ -190,3 +234,39 @@ def get_claim_relevant_clauses(
 ) -> ClaimRelevantClausesResult:
     """Return claim-relevant clauses and structured conditions for the calculation backend."""
     return _get_engine().get_claim_relevant_clauses(policy_id, treatment_details)
+
+
+def extract_hospital_bill(file_path: str) -> HospitalBill:
+    """Read a hospital bill (PDF, scanned PDF or photo) into structured line items."""
+    return extract_bill(file_path, llm=_get_engine().llm)
+
+
+def estimate_claim_payout(
+    policy_id: str, bill: HospitalBill, context: Optional[ClaimContext] = None
+) -> PayoutEstimate:
+    """Deterministic payout estimate for a bill under an ingested policy.
+
+    Uses the policy details extracted earlier and pure Python arithmetic (no LLM).
+    """
+    details = load_policy_details(policy_id)
+    return estimate_payout(details, bill, context, policy_id=policy_id)
+
+
+def explain_clause_text(text: str, language: Optional[str] = "en") -> SimpleExplanation:
+    """Explain pasted policy wording in simple language (no clause number needed)."""
+    if not text or len(text.strip()) < 20:
+        raise InvalidQuestionError("Paste at least one full sentence of the policy wording.")
+    engine = _get_engine()
+    original = text.strip()[:4000]
+    if isinstance(engine.llm, MockLLMProvider):
+        explanation = INSUFFICIENT_EVIDENCE_ANSWER
+    else:
+        explanation = engine.llm.generate(
+            simplification_prompt(original), system_prompt=MANDATORY_RAG_INSTRUCTIONS).strip()
+    result = SimpleExplanation(policy_id="pasted_text", original_clause=original,
+                               simple_explanation=explanation)
+    if normalize_language(language) == "hi":
+        translated, ok = translate_text(result.simple_explanation, "hi", engine.llm)
+        if ok:
+            result.simple_explanation, result.language = translated, "hi"
+    return result

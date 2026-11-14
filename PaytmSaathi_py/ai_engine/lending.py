@@ -1,0 +1,495 @@
+"""Lending journeys: EMI, eligibility, documents, offer comparison, plain-language terms.
+
+All numbers come from deterministic code. The eligibility rules and interest-rate
+bands below are *illustrative defaults* (editable in ``LENDING_RULES``) - they are not
+any lender's actual policy, and every result says so. The LLM is only used to explain
+agreement text in plain language, never to decide eligibility or compute money.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from .exceptions import CalculationInputError, LLMProviderError
+from .language import translate_text
+from .llm_provider import LLMProvider, MockLLMProvider
+
+LOAN_TYPES = ["personal", "home", "vehicle", "business", "education", "gold"]
+
+# Illustrative rules. rate_bands: (min_score, annual_rate_pct) high->low score.
+LENDING_RULES: dict[str, dict] = {
+    "personal": {"max_foir": 0.50, "max_tenure_m": 60, "min_income": 15000, "min_score": 650,
+                 "rate_bands": [(750, 11.5), (700, 14.0), (650, 18.0)], "secured": False},
+    "home": {"max_foir": 0.55, "max_tenure_m": 360, "min_income": 20000, "min_score": 650,
+             "rate_bands": [(750, 8.75), (700, 9.5), (650, 10.5)], "secured": True},
+    "vehicle": {"max_foir": 0.50, "max_tenure_m": 84, "min_income": 15000, "min_score": 650,
+                "rate_bands": [(750, 9.5), (700, 11.0), (650, 13.5)], "secured": True},
+    "business": {"max_foir": 0.45, "max_tenure_m": 84, "min_income": 25000, "min_score": 680,
+                 "rate_bands": [(750, 13.0), (700, 16.0), (680, 20.0)], "secured": False},
+    "education": {"max_foir": 0.55, "max_tenure_m": 180, "min_income": 0, "min_score": 0,
+                  "rate_bands": [(750, 9.5), (700, 10.5), (0, 12.0)], "secured": True},
+    "gold": {"max_foir": 0.60, "max_tenure_m": 36, "min_income": 0, "min_score": 0,
+             "rate_bands": [(0, 9.5)], "secured": True},
+}
+RETIREMENT_AGE = {"salaried": 60, "self_employed": 65}
+DISCLAIMER = (
+    "Indicative result using illustrative rules. It is not a loan offer or approval; "
+    "the lender decides eligibility and the final interest rate."
+)
+
+
+# ---------------------------------------------------------------------------
+# EMI maths
+# ---------------------------------------------------------------------------
+def calculate_emi(principal: float, annual_rate_pct: float, tenure_months: int) -> float:
+    if principal <= 0:
+        raise CalculationInputError("Loan amount must be greater than zero.")
+    if tenure_months <= 0:
+        raise CalculationInputError("Tenure must be at least 1 month.")
+    if annual_rate_pct < 0 or annual_rate_pct > 100:
+        raise CalculationInputError("Interest rate must be between 0 and 100%.")
+    r = annual_rate_pct / 12.0 / 100.0
+    if r == 0:
+        return round(principal / tenure_months, 2)
+    factor = (1 + r) ** tenure_months
+    return round(principal * r * factor / (factor - 1), 2)
+
+
+def max_principal_for_emi(emi: float, annual_rate_pct: float, tenure_months: int) -> float:
+    """Largest loan whose EMI does not exceed ``emi``."""
+    if emi <= 0 or tenure_months <= 0:
+        return 0.0
+    r = annual_rate_pct / 12.0 / 100.0
+    if r == 0:
+        return round(emi * tenure_months, 2)
+    return round(emi * ((1 + r) ** tenure_months - 1) / (r * (1 + r) ** tenure_months), 2)
+
+
+class ScheduleRow(BaseModel):
+    month: int
+    emi: float
+    interest: float
+    principal: float
+    balance: float
+
+
+class LoanSummary(BaseModel):
+    principal: float
+    annual_rate_pct: float
+    tenure_months: int
+    emi: float
+    total_interest: float
+    total_payment: float
+    interest_share_pct: float
+
+
+def amortization_schedule(principal: float, annual_rate_pct: float, tenure_months: int) -> list[ScheduleRow]:
+    emi = calculate_emi(principal, annual_rate_pct, tenure_months)
+    r = annual_rate_pct / 12.0 / 100.0
+    balance, rows = principal, []
+    for month in range(1, tenure_months + 1):
+        interest = balance * r
+        principal_part = min(emi - interest, balance)
+        if month == tenure_months:  # absorb rounding in the final instalment
+            principal_part = balance
+        balance = max(balance - principal_part, 0.0)
+        rows.append(ScheduleRow(month=month, emi=round(principal_part + interest, 2),
+                                interest=round(interest, 2), principal=round(principal_part, 2),
+                                balance=round(balance, 2)))
+    return rows
+
+
+def loan_summary(principal: float, annual_rate_pct: float, tenure_months: int) -> LoanSummary:
+    rows = amortization_schedule(principal, annual_rate_pct, tenure_months)
+    total_payment = round(sum(row.emi for row in rows), 2)
+    total_interest = round(total_payment - principal, 2)
+    return LoanSummary(
+        principal=principal, annual_rate_pct=annual_rate_pct, tenure_months=tenure_months,
+        emi=calculate_emi(principal, annual_rate_pct, tenure_months),
+        total_interest=total_interest, total_payment=total_payment,
+        interest_share_pct=round(100 * total_interest / total_payment, 1) if total_payment else 0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Eligibility
+# ---------------------------------------------------------------------------
+class LoanApplicant(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    loan_type: str = "personal"
+    employment_type: str = "salaried"  # salaried | self_employed
+    age: int = 30
+    monthly_income: float
+    existing_emi: float = 0.0
+    credit_score: Optional[int] = None  # 300-900; None = unknown
+    requested_amount: float
+    tenure_months: int
+
+
+class EligibilityResult(BaseModel):
+    decision: str  # likely_eligible | partially_eligible | unlikely
+    loan_type: str
+    indicative_rate_pct: Optional[float] = None
+    max_eligible_amount: float = 0.0
+    requested_amount: float
+    emi_for_requested: Optional[float] = None
+    max_affordable_emi: float = 0.0
+    foir_after_loan_pct: Optional[float] = None
+    suggested_tenure_months: Optional[int] = None
+    reasons: list[str] = Field(default_factory=list)
+    reasons_hi: list[str] = Field(default_factory=list)
+    tips: list[str] = Field(default_factory=list)
+    tips_hi: list[str] = Field(default_factory=list)
+    documents: list[dict] = Field(default_factory=list)
+    disclaimer: str = DISCLAIMER
+
+
+def _rate_for(rules: dict, score: Optional[int]) -> Optional[float]:
+    bands = rules["rate_bands"]
+    if score is None:
+        return bands[-1][1]  # unknown score: assume the most conservative band
+    for min_score, rate in bands:
+        if score >= min_score:
+            return rate
+    return None
+
+
+def check_loan_eligibility(applicant: LoanApplicant) -> EligibilityResult:
+    a = applicant
+    if a.loan_type not in LENDING_RULES:
+        raise CalculationInputError(f"Unsupported loan type. Choose one of: {', '.join(LOAN_TYPES)}.")
+    if a.monthly_income < 0 or a.existing_emi < 0 or a.requested_amount <= 0 or a.tenure_months <= 0:
+        raise CalculationInputError("Income, EMIs, amount and tenure must be positive numbers.")
+    if not 18 <= a.age <= 80:
+        raise CalculationInputError("Age must be between 18 and 80.")
+    if a.credit_score is not None and not 300 <= a.credit_score <= 900:
+        raise CalculationInputError("Credit score must be between 300 and 900.")
+
+    rules = LENDING_RULES[a.loan_type]
+    res = EligibilityResult(decision="likely_eligible", loan_type=a.loan_type,
+                            requested_amount=a.requested_amount)
+    res.documents = required_documents(a.loan_type, a.employment_type)
+    blockers: list[tuple[str, str]] = []
+
+    # Tenure limited by product maximum and by retirement age.
+    if a.loan_type == "education":
+        years_left_m = 10**6  # the student repays after studies; no retirement cap
+    else:
+        retire = RETIREMENT_AGE.get(a.employment_type, 60) + (10 if a.loan_type == "home" else 0)
+        years_left_m = max((retire - a.age) * 12, 0)
+    max_tenure = min(rules["max_tenure_m"], years_left_m)
+    tenure = min(a.tenure_months, max_tenure) if max_tenure > 0 else 0
+    if tenure <= 0:
+        blockers.append(("Your age leaves no repayment period before retirement age for this loan.",
+                         "रिटायरमेंट की उम्र से पहले इस लोन के लिए चुकाने का समय नहीं बचता।"))
+    elif tenure < a.tenure_months:
+        res.reasons.append(f"Tenure reduced to {tenure} months (product/age limit).")
+        res.reasons_hi.append(f"अवधि घटाकर {tenure} महीने की गई (प्रोडक्ट/उम्र की सीमा)।")
+
+    if a.monthly_income < rules["min_income"]:
+        blockers.append((f"Monthly income is below the usual minimum of ₹{rules['min_income']:,} for this loan.",
+                         f"मासिक आय इस लोन की सामान्य न्यूनतम ₹{rules['min_income']:,} से कम है।"))
+    if a.credit_score is not None and a.credit_score < rules["min_score"]:
+        blockers.append((f"Credit score {a.credit_score} is below the usual minimum of {rules['min_score']}.",
+                         f"क्रेडिट स्कोर {a.credit_score} सामान्य न्यूनतम {rules['min_score']} से कम है।"))
+    if a.credit_score is None:
+        res.reasons.append("Credit score not provided; the highest indicative rate band is assumed.")
+        res.reasons_hi.append("क्रेडिट स्कोर नहीं दिया गया; सबसे ऊँची संभावित ब्याज दर मानी गई है।")
+
+    rate = _rate_for(rules, a.credit_score)
+    res.indicative_rate_pct = rate
+    cap_emi = max(a.monthly_income * rules["max_foir"] - a.existing_emi, 0.0)
+    res.max_affordable_emi = round(cap_emi, 2)
+
+    if rate is not None and tenure > 0:
+        res.max_eligible_amount = max_principal_for_emi(cap_emi, rate, tenure)
+        res.emi_for_requested = calculate_emi(a.requested_amount, rate, tenure)
+        if a.monthly_income > 0:
+            res.foir_after_loan_pct = round(100 * (a.existing_emi + res.emi_for_requested) / a.monthly_income, 1)
+        if res.emi_for_requested > cap_emi:
+            # Longest tenure needed to fit the request?
+            for m in range(tenure, max_tenure + 1):
+                if calculate_emi(a.requested_amount, rate, m) <= cap_emi:
+                    res.suggested_tenure_months = m
+                    break
+            blockers_amount = (f"Requested EMI ₹{res.emi_for_requested:,.0f} is above what you can comfortably "
+                               f"afford (₹{cap_emi:,.0f}/month, {int(rules['max_foir']*100)}% of income after existing EMIs).",
+                               f"माँगी गई ईएमआई ₹{res.emi_for_requested:,.0f} आपकी सुविधाजनक सीमा (₹{cap_emi:,.0f}/माह) से ज़्यादा है।")
+            res.reasons.append(blockers_amount[0])
+            res.reasons_hi.append(blockers_amount[1])
+            res.decision = "partially_eligible" if res.max_eligible_amount >= 0.3 * a.requested_amount else "unlikely"
+            res.tips.append(f"You may qualify for about ₹{res.max_eligible_amount:,.0f} on this tenure.")
+            res.tips_hi.append(f"इस अवधि पर आप लगभग ₹{res.max_eligible_amount:,.0f} के लिए पात्र हो सकते हैं।")
+            if res.suggested_tenure_months:
+                res.tips.append(f"A tenure of {res.suggested_tenure_months} months would fit your request (but costs more interest).")
+                res.tips_hi.append(f"{res.suggested_tenure_months} महीने की अवधि में आपका अनुरोध फिट होगा (पर ब्याज ज़्यादा लगेगा)।")
+    else:
+        res.decision = "unlikely"
+
+    if blockers:
+        res.decision = "unlikely"
+        for en, hi in blockers:
+            res.reasons.append(en)
+            res.reasons_hi.append(hi)
+        if a.credit_score is not None and a.credit_score < rules["min_score"]:
+            res.tips += ["Pay all dues on time for 6+ months and keep card usage under 30% of the limit to improve your score.",
+                         "Consider a smaller amount, a secured loan, or adding a co-applicant."]
+            res.tips_hi += ["6+ महीने सभी बकाया समय पर चुकाएँ और कार्ड का उपयोग सीमा के 30% से कम रखें।",
+                            "छोटी राशि, सिक्योर्ड लोन या सह-आवेदक जोड़ने पर विचार करें।"]
+    if res.decision == "likely_eligible":
+        res.reasons.append("Your income and obligations support the requested EMI.")
+        res.reasons_hi.append("आपकी आय और मौजूदा किस्तें माँगी गई ईएमआई के अनुकूल हैं।")
+    if a.existing_emi > 0.3 * a.monthly_income > 0:
+        res.tips.append("Closing a small existing loan first would raise your eligible amount.")
+        res.tips_hi.append("पहले कोई छोटा मौजूदा लोन बंद करने से आपकी पात्र राशि बढ़ेगी।")
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Documents, glossary
+# ---------------------------------------------------------------------------
+_BASE_DOCS = [
+    {"en": "PAN card", "hi": "पैन कार्ड"},
+    {"en": "Aadhaar card (identity and address)", "hi": "आधार कार्ड (पहचान और पता)"},
+    {"en": "Recent passport-size photograph", "hi": "हाल की पासपोर्ट साइज़ फोटो"},
+    {"en": "Last 6 months bank statements", "hi": "पिछले 6 महीने का बैंक स्टेटमेंट"},
+]
+_EMPLOYMENT_DOCS = {
+    "salaried": [
+        {"en": "Last 3 months salary slips", "hi": "पिछले 3 महीने की सैलरी स्लिप"},
+        {"en": "Form 16 or last 2 years ITR (if available)", "hi": "फॉर्म 16 या पिछले 2 साल का आईटीआर (यदि हो)"},
+        {"en": "Employment ID / offer letter", "hi": "कंपनी आईडी / ऑफर लेटर"},
+    ],
+    "self_employed": [
+        {"en": "Last 2-3 years ITR with computation of income", "hi": "पिछले 2-3 साल का आईटीआर"},
+        {"en": "Business proof (GST registration / Udyam / shop licence)", "hi": "व्यवसाय का प्रमाण (जीएसटी / उद्यम / दुकान लाइसेंस)"},
+        {"en": "Last 12 months business bank statements", "hi": "पिछले 12 महीने का बिज़नेस बैंक स्टेटमेंट"},
+    ],
+}
+_LOAN_DOCS = {
+    "home": [{"en": "Sale agreement and property papers", "hi": "बिक्री अनुबंध और संपत्ति के कागज़ात"},
+             {"en": "Approved building plan and title documents", "hi": "मंज़ूर नक्शा और टाइटल दस्तावेज़"}],
+    "vehicle": [{"en": "Vehicle quotation / proforma invoice", "hi": "वाहन का कोटेशन / प्रोफॉर्मा इनवॉइस"},
+                {"en": "Valid driving licence", "hi": "वैध ड्राइविंग लाइसेंस"}],
+    "business": [{"en": "Business plan or projections", "hi": "बिज़नेस प्लान या अनुमान"},
+                 {"en": "Existing loan statements (if any)", "hi": "मौजूदा लोन स्टेटमेंट (यदि हों)"}],
+    "education": [{"en": "Admission letter and fee structure", "hi": "एडमिशन लेटर और फीस विवरण"},
+                  {"en": "Marksheets of last qualifying exam", "hi": "पिछली परीक्षा की मार्कशीट"},
+                  {"en": "Co-applicant (parent/guardian) income proof", "hi": "सह-आवेदक (अभिभावक) का आय प्रमाण"}],
+    "gold": [{"en": "Gold ornaments for valuation (no income proof usually needed)", "hi": "मूल्यांकन के लिए सोने के गहने"}],
+    "personal": [],
+}
+
+
+def required_documents(loan_type: str, employment_type: str = "salaried") -> list[dict]:
+    if loan_type not in LENDING_RULES:
+        raise CalculationInputError(f"Unsupported loan type: {loan_type}")
+    if loan_type == "gold":
+        return _BASE_DOCS[:2] + _LOAN_DOCS["gold"]
+    return _BASE_DOCS + _EMPLOYMENT_DOCS.get(employment_type, _EMPLOYMENT_DOCS["salaried"]) + _LOAN_DOCS[loan_type]
+
+
+GLOSSARY: dict[str, dict[str, str]] = {
+    "EMI": {"en": "Equated Monthly Instalment: the fixed amount you pay every month, part principal and part interest.",
+            "hi": "हर महीने चुकाई जाने वाली तय किस्त, जिसमें मूलधन और ब्याज दोनों होते हैं।"},
+    "Principal": {"en": "The amount you actually borrow.", "hi": "वह राशि जो आप वास्तव में उधार लेते हैं।"},
+    "Tenure": {"en": "How long you take to repay the loan.", "hi": "लोन चुकाने की अवधि।"},
+    "APR": {"en": "Annual Percentage Rate: the true yearly cost of the loan including fees, so offers can be compared fairly.",
+            "hi": "लोन की असली सालाना लागत (शुल्क सहित), जिससे ऑफर की सही तुलना हो सके।"},
+    "Processing fee": {"en": "One-time fee charged by the lender, usually 0.5%-3% of the loan, often deducted before disbursal.",
+                       "hi": "लोन देने वाले का एकमुश्त शुल्क, आमतौर पर लोन का 0.5%-3%, अक्सर पहले ही काट लिया जाता है।"},
+    "Foreclosure": {"en": "Closing the whole loan before the tenure ends. Check for foreclosure charges.",
+                    "hi": "अवधि पूरी होने से पहले पूरा लोन बंद करना। फोरक्लोज़र शुल्क ज़रूर देखें।"},
+    "Prepayment": {"en": "Paying part of the loan early to cut interest. Some lenders charge a fee.",
+                   "hi": "ब्याज घटाने के लिए लोन का कुछ हिस्सा पहले चुकाना। कुछ लेंडर शुल्क लेते हैं।"},
+    "Floating rate": {"en": "Interest rate that moves with a market benchmark, so your EMI or tenure can change.",
+                      "hi": "बाज़ार के बेंचमार्क के साथ बदलने वाली ब्याज दर; इससे ईएमआई या अवधि बदल सकती है।"},
+    "Fixed rate": {"en": "Interest rate that stays the same for the agreed period.", "hi": "तय अवधि तक न बदलने वाली ब्याज दर।"},
+    "FOIR": {"en": "Fixed Obligations to Income Ratio: share of monthly income that goes to EMIs. Lenders prefer under 50%.",
+             "hi": "मासिक आय का वह हिस्सा जो किस्तों में जाता है। लेंडर 50% से कम पसंद करते हैं।"},
+    "Credit score": {"en": "A 300-900 number showing repayment history. 750+ usually gets the best rates.",
+                     "hi": "चुकौती इतिहास दिखाने वाला 300-900 का नंबर। 750+ पर आमतौर पर सबसे अच्छी दर मिलती है।"},
+    "Moratorium": {"en": "A period at the start when you may pay no EMI (interest usually still builds up).",
+                   "hi": "शुरुआत की वह अवधि जब ईएमआई नहीं देनी पड़ती (ब्याज आमतौर पर फिर भी जुड़ता है)।"},
+    "Collateral": {"en": "An asset (home, gold, vehicle) pledged to the lender as security.",
+                   "hi": "लेंडर को सुरक्षा के रूप में गिरवी रखी गई संपत्ति (घर, सोना, वाहन)।"},
+    "Penal charges": {"en": "Extra charges for late or missed EMIs.", "hi": "देर से या छूटी हुई ईएमआई पर अतिरिक्त शुल्क।"},
+}
+
+
+def explain_loan_text(text: str, language: str = "en", llm: Optional[LLMProvider] = None) -> dict:
+    """Plain-language help for loan agreement text.
+
+    Always returns the glossary terms found in the text. When a real LLM is configured
+    it also returns a simple explanation (never advice, never new terms).
+    """
+    if not text or not text.strip():
+        raise CalculationInputError("Paste some loan text to explain.")
+    found = [{"term": term, **info} for term, info in GLOSSARY.items()
+             if re.search(rf"\b{re.escape(term)}\b", text, re.IGNORECASE)]
+    explanation = None
+    if llm is not None and not isinstance(llm, MockLLMProvider):
+        prompt = (
+            "Explain this loan agreement text in simple English for a first-time borrower. "
+            "Use only what the text says; do not add terms, advice or calculations. "
+            "Point out any fees, penalties or conditions the borrower should notice, as bullet points. "
+            f"If the text is unclear, say so.\n\nTEXT:\n{text[:6000]}"
+        )
+        try:
+            explanation = llm.generate(prompt, temperature=0.1, max_tokens=700).strip()
+            if language == "hi":
+                explanation, _ = translate_text(explanation, "hi", llm)
+        except LLMProviderError:
+            explanation = None
+    return {"explanation": explanation, "terms": found, "language": language,
+            "note": None if explanation else "Connect an LLM (see .env) for a full plain-language explanation."}
+
+
+# ---------------------------------------------------------------------------
+# Offer comparison
+# ---------------------------------------------------------------------------
+class LoanOffer(BaseModel):
+    name: str
+    principal: float
+    annual_rate_pct: float
+    tenure_months: int
+    processing_fee_pct: float = 0.0
+    other_fees: float = 0.0
+
+
+class OfferComparison(BaseModel):
+    name: str
+    emi: float
+    total_interest: float
+    fees: float
+    total_cost: float  # interest + fees
+    total_payment: float
+    effective_apr_pct: float
+    best: bool = False
+
+
+def _effective_apr(net_disbursed: float, emi: float, months: int) -> float:
+    """Annualised IRR of the loan after fees (bisection on the monthly rate)."""
+    if net_disbursed <= 0:
+        return 0.0
+    lo, hi = 0.0, 1.0
+    for _ in range(100):
+        mid = (lo + hi) / 2
+        pv = emi * months if mid == 0 else emi * (1 - (1 + mid) ** -months) / mid
+        lo, hi = (mid, hi) if pv > net_disbursed else (lo, mid)
+    return round(((lo + hi) / 2) * 12 * 100, 2)
+
+
+def compare_loan_offers(offers: list[LoanOffer]) -> list[OfferComparison]:
+    if len(offers) < 2:
+        raise CalculationInputError("Add at least two offers to compare.")
+    results = []
+    for offer in offers:
+        emi = calculate_emi(offer.principal, offer.annual_rate_pct, offer.tenure_months)
+        total_payment = round(emi * offer.tenure_months, 2)
+        interest = round(total_payment - offer.principal, 2)
+        fees = round(offer.principal * offer.processing_fee_pct / 100 + offer.other_fees, 2)
+        results.append(OfferComparison(
+            name=offer.name, emi=emi, total_interest=interest, fees=fees,
+            total_cost=round(interest + fees, 2), total_payment=round(total_payment + fees, 2),
+            effective_apr_pct=_effective_apr(offer.principal - fees, emi, offer.tenure_months)))
+    cheapest = min(results, key=lambda r: r.total_cost)
+    cheapest.best = True
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Prepayment planner (keep EMI, shorten tenure)
+# ---------------------------------------------------------------------------
+class PrepaymentPlan(BaseModel):
+    emi: float
+    original_months: int
+    new_months: int
+    months_saved: int
+    original_interest: float
+    new_interest: float
+    interest_saved: float
+    total_prepaid: float
+    balance_original: list[float] = Field(default_factory=list)  # balance at the end of each year
+    balance_new: list[float] = Field(default_factory=list)
+    note: str = ("Assumes prepayments reduce the tenure and the EMI stays the same. "
+                 "Some lenders charge a prepayment fee on fixed-rate loans; floating-rate home loans "
+                 "for individuals usually have none.")
+
+
+def prepayment_plan(principal: float, annual_rate_pct: float, tenure_months: int,
+                    extra_monthly: float = 0.0, yearly_extra: float = 0.0,
+                    lump_sum: float = 0.0, lump_sum_month: int = 12) -> PrepaymentPlan:
+    """Interest and months saved by paying extra on top of the EMI."""
+    if min(extra_monthly, yearly_extra, lump_sum) < 0:
+        raise CalculationInputError("Extra payments cannot be negative.")
+    emi = calculate_emi(principal, annual_rate_pct, tenure_months)
+    r = annual_rate_pct / 12.0 / 100.0
+
+    def simulate(with_extra: bool):
+        balance, interest_total, prepaid, month, yearly = principal, 0.0, 0.0, 0, []
+        while balance > 0.005 and month < tenure_months:
+            month += 1
+            interest = balance * r
+            interest_total += interest
+            balance = balance + interest - min(emi, balance + interest)
+            if with_extra and balance > 0:
+                extra = extra_monthly
+                if month % 12 == 0:
+                    extra += yearly_extra
+                if month == lump_sum_month:
+                    extra += lump_sum
+                extra = min(extra, balance)
+                balance -= extra
+                prepaid += extra
+            if month % 12 == 0 or balance <= 0.005:
+                yearly.append(round(max(balance, 0.0), 2))
+        return month, round(interest_total, 2), round(prepaid, 2), yearly
+
+    m0, i0, _, y0 = simulate(False)
+    m1, i1, prepaid, y1 = simulate(True)
+    return PrepaymentPlan(emi=emi, original_months=m0, new_months=m1, months_saved=m0 - m1,
+                          original_interest=i0, new_interest=i1, interest_saved=round(i0 - i1, 2),
+                          total_prepaid=prepaid, balance_original=y0, balance_new=y1)
+
+
+# ---------------------------------------------------------------------------
+# Eligibility levers: what would change the answer?
+# ---------------------------------------------------------------------------
+class EligibilityLever(BaseModel):
+    lever: str
+    lever_hi: str
+    max_eligible_amount: float
+    change: float
+    decision: str
+
+
+def eligibility_levers(applicant: LoanApplicant) -> list[EligibilityLever]:
+    """Re-run the (illustrative) eligibility rules with one change at a time."""
+    base = check_loan_eligibility(applicant)
+    rules = LENDING_RULES[applicant.loan_type]
+    scenarios: list[tuple[str, str, LoanApplicant]] = []
+    longer = min(applicant.tenure_months + 24, rules["max_tenure_m"])
+    if longer > applicant.tenure_months:
+        scenarios.append((f"Longer tenure ({longer} months)", f"लंबी अवधि ({longer} महीने)",
+                          applicant.model_copy(update={"tenure_months": longer})))
+    if applicant.existing_emi > 0:
+        scenarios.append(("Close existing EMIs first", "पहले मौजूदा ईएमआई बंद करें",
+                          applicant.model_copy(update={"existing_emi": 0.0})))
+    if applicant.credit_score is None or applicant.credit_score < 750:
+        scenarios.append(("Credit score 750+", "क्रेडिट स्कोर 750+",
+                          applicant.model_copy(update={"credit_score": 760})))
+    scenarios.append(("Add a co-applicant earning 50% of your income", "आपकी आय के 50% कमाने वाला सह-आवेदक जोड़ें",
+                      applicant.model_copy(update={"monthly_income": applicant.monthly_income * 1.5})))
+    out = [EligibilityLever(lever="Today", lever_hi="आज", max_eligible_amount=base.max_eligible_amount,
+                            change=0.0, decision=base.decision)]
+    for en, hi, changed in scenarios:
+        res = check_loan_eligibility(changed)
+        out.append(EligibilityLever(lever=en, lever_hi=hi, max_eligible_amount=res.max_eligible_amount,
+                                    change=round(res.max_eligible_amount - base.max_eligible_amount, 2),
+                                    decision=res.decision))
+    return out

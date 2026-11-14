@@ -18,6 +18,7 @@ from .exceptions import (
     PDFExtractionError,
     ScannedPDFError,
 )
+from .ocr import ocr_available, ocr_pdf_pages
 from .schemas import DocumentExtractionResult, PageContent
 from .utils import clean_policy_text, logger
 
@@ -43,12 +44,16 @@ def validate_pdf_file(file_path: Union[str, Path]) -> Path:
     return path
 
 
-def extract_pdf_pages(file_path: Union[str, Path]) -> DocumentExtractionResult:
+def extract_pdf_pages(
+    file_path: Union[str, Path], allow_ocr: bool = True
+) -> DocumentExtractionResult:
     """Extract text from every page of a policy PDF.
 
     Returns page-level content (page_number, page_text, source_filename).
-    Raises ScannedPDFError when no extractable text is found anywhere in the
-    document, so callers are forced to handle the OCR case explicitly.
+    When the PDF has no text layer (a scan) and ``allow_ocr`` is true, pages are
+    OCRed via ``ocr.py`` if an OCR backend is installed. Raises ScannedPDFError
+    when no text can be obtained at all, so an image-only PDF is never silently
+    treated as an empty document.
     """
     path = validate_pdf_file(file_path)
 
@@ -85,9 +90,21 @@ def extract_pdf_pages(file_path: Union[str, Path]) -> DocumentExtractionResult:
 
         has_extractable_text = len(all_text.strip()) > 0
         if not has_extractable_text:
-            raise ScannedPDFError(
-                "No extractable text found in the PDF. "
-                "It appears to be scanned or image-based; OCR is required."
+            ocr_pages = _try_ocr(path) if allow_ocr else None
+            if not ocr_pages:
+                raise ScannedPDFError(
+                    "No extractable text found in the PDF. It appears to be scanned or "
+                    "image-based, and OCR "
+                    + ("produced no text. Try a clearer scan."
+                       if allow_ocr and ocr_available()
+                       else "is not installed. Run: pip install rapidocr-onnxruntime")
+                )
+            return DocumentExtractionResult(
+                source_filename=path.name,
+                total_pages=doc.page_count,
+                pages=ocr_pages,
+                has_extractable_text=True,
+                is_scanned=True,
             )
 
         return DocumentExtractionResult(
@@ -99,3 +116,23 @@ def extract_pdf_pages(file_path: Union[str, Path]) -> DocumentExtractionResult:
         )
     finally:
         doc.close()
+
+
+def _try_ocr(path: Path) -> list[PageContent]:
+    """OCR a scanned PDF. Returns [] when OCR is unavailable or finds nothing."""
+    if not ocr_available():
+        return []
+    try:
+        raw_pages = ocr_pdf_pages(path)
+    except Exception as exc:  # OCR is best-effort; caller raises ScannedPDFError
+        logger.warning("OCR failed: %s", exc)
+        return []
+    pages = [
+        PageContent(
+            page_number=number,
+            page_text=clean_policy_text(text),
+            source_filename=path.name,
+        )
+        for number, text in raw_pages
+    ]
+    return pages if any(page.page_text for page in pages) else []
