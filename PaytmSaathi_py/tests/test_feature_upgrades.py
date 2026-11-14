@@ -112,7 +112,7 @@ def test_eligibility_levers_show_improvements():
 # ----------------------------- fintech ------------------------------------
 def test_tickets_listed_per_user_with_dates(tmp_path):
     d = str(tmp_path)
-    mine = fintech.create_dispute_ticket("money debited but payment failed", 2000, "UTR1",
+    mine = fintech.create_dispute_ticket("money debited but payment failed", 2000, "UTR123456",
                                          directory=d, user_id="U1", transaction_date="2026-11-01")
     fintech.create_dispute_ticket("refund not received", directory=d, user_id="U2")
     listed = fintech.list_dispute_tickets("U1", directory=d)
