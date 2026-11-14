@@ -5,6 +5,8 @@ the FastAPI layer (owned by another team member) can map exceptions to HTTP
 responses in one place.
 """
 
+from __future__ import annotations
+
 
 class PaytmSaathiError(Exception):
     """Base exception for all AI engine errors."""
