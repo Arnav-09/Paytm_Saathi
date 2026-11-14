@@ -5,14 +5,14 @@ from __future__ import annotations
 import streamlit as st
 
 from ai_engine import accounts
-from frontend.common import HINDI_LABEL, LANG_OPTIONS, L, login, run
+from frontend.common import _CODE_BY_LABEL, LANG_OPTIONS, L, login, run
 from frontend.theme import esc
 
 
 def render() -> None:
     top_l, top_r = st.columns([4, 1.4], vertical_alignment="center")
     top_l.markdown('<div class="ps-brand"><span class="ps-logo">S</span>Paytm <b>Saathi</b></div>', unsafe_allow_html=True)
-    top_r.radio("Language", LANG_OPTIONS, key="lang_choice", horizontal=True, label_visibility="collapsed")
+    top_r.selectbox("Language", LANG_OPTIONS, key="lang_choice", label_visibility="collapsed")
     st.write("")
 
     side, main = st.columns([1, 1.15], gap="large")
@@ -65,13 +65,13 @@ def _register_form() -> None:
         password = c3.text_input(L("Password", "पासवर्ड"), type="password",
                                  help=L("At least 8 characters with a letter and a number.", "कम से कम 8 अक्षर, जिसमें एक अक्षर और एक अंक हो।"))
         confirm = c4.text_input(L("Confirm password", "पासवर्ड दोबारा"), type="password")
-        language = st.radio(L("Preferred language", "पसंदीदा भाषा"), LANG_OPTIONS, horizontal=True,
-                            index=1 if st.session_state.get("lang_choice") == HINDI_LABEL else 0)
+        language = st.selectbox(L("Preferred language", "पसंदीदा भाषा"), LANG_OPTIONS,
+                                index=LANG_OPTIONS.index(st.session_state.get("lang_choice", "English")))
         terms = st.checkbox(L("I agree to the terms of use and privacy policy", "मैं उपयोग की शर्तों और गोपनीयता नीति से सहमत हूँ"))
         submitted = st.form_submit_button(L("Create account", "खाता बनाएँ"), type="primary", width="stretch")
     if submitted:
         user = run(accounts.register_user, name, mobile, password, confirm, email or None,
-                   "hi" if language == HINDI_LABEL else "en", terms)
+                   _CODE_BY_LABEL.get(language, "en"), terms)
         if user:
             login(user)
             st.success(L(f"Welcome, {user.first_name}! Your account is ready.", f"स्वागत है, {user.first_name}! आपका खाता तैयार है।"))

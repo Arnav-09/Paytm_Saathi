@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from ai_engine import get_llm_provider, lending
-from frontend.common import L, lang, pick, run
+from frontend.common import L, bi, lang, pair, pick, run
 from frontend.theme import CYAN, NAVY, esc, inr, note, page_header, pill
 
 LOAN_LABELS = {"personal": ("Personal", "पर्सनल"), "home": ("Home", "होम"), "vehicle": ("Vehicle", "वाहन"),
@@ -15,11 +15,11 @@ EMP_LABELS = {"salaried": ("Salaried", "नौकरीपेशा"), "self_emp
 
 
 def _loan(k):
-    return LOAN_LABELS[k][lang() == "hi"]
+    return pair(LOAN_LABELS[k])
 
 
 def _emp(k):
-    return EMP_LABELS[k][lang() == "hi"]
+    return pair(EMP_LABELS[k])
 
 
 def _years(months: int) -> str:
@@ -125,7 +125,7 @@ def tab_eligibility():
         note(text)
     with st.expander(L("Documents you will need", "ज़रूरी दस्तावेज़")):
         for doc in res.documents:
-            st.markdown("- " + doc["hi" if lang() == "hi" else "en"])
+            st.markdown("- " + bi(doc))
     st.caption(res.disclaimer)
 
 
@@ -174,7 +174,7 @@ def tab_help():
     with st.container(border=True):
         st.markdown(f"**{L('Document checklist', 'दस्तावेज़ चेकलिस्ट')}**")
         for i, doc in enumerate(docs):
-            done += st.checkbox(doc["hi" if lang() == "hi" else "en"], key=f"doc_{ltype}_{emp}_{i}")
+            done += st.checkbox(bi(doc), key=f"doc_{ltype}_{emp}_{i}")
         st.progress(done / len(docs), text=L(f"{done} of {len(docs)} ready", f"{len(docs)} में से {done} तैयार"))
     st.markdown(f"#### {L('Understand a loan offer or agreement', 'लोन ऑफर या एग्रीमेंट समझें')}")
     text = st.text_area(L("Paste the text from the offer or agreement", "ऑफर या एग्रीमेंट का टेक्स्ट पेस्ट करें"), height=130, key="loan_text")
@@ -187,10 +187,10 @@ def tab_help():
             elif res["note"]:
                 note(L(res["note"], "पूरी व्याख्या के लिए एआई कुंजी जोड़ें (.env देखें)।"))
             for term in res["terms"]:
-                st.markdown(f"**{term['term']}**: {term['hi' if lang() == 'hi' else 'en']}")
+                st.markdown(f"**{term['term']}**: {bi(term)}")
     with st.expander(L("📖 Loan words in plain language", "📖 लोन के शब्द आसान भाषा में")):
         for term, info in lending.GLOSSARY.items():
-            st.markdown(f"**{term}** - {info['hi' if lang() == 'hi' else 'en']}")
+            st.markdown(f"**{term}** - {bi(info)}")
 
 
 def render():

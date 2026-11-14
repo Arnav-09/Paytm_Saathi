@@ -16,7 +16,7 @@ from .exceptions import PolicyNotFoundError, VectorStoreError
 from .schemas import Chunk
 from .utils import CHROMA_PERSIST_DIR, ensure_dir, logger, sanitize_collection_name
 
-POLICY_REGISTRY_COLLECTION = "__policies_registry__"
+POLICY_REGISTRY_COLLECTION = "policies-registry"  # must start/end with a letter or digit
 
 
 class ChromaVectorStore:

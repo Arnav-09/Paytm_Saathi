@@ -374,12 +374,59 @@ pytest -q
 
 1. Sign up at https://console.groq.com (free, no credit card) and create an API key.
 2. In `.env` set `LLM_PROVIDER=groq` and `GROQ_API_KEY=<your key>`.
-3. Restart the app. The chip at the top changes from "Demo mode" to "AI: Groq · llama-3.3-70b-versatile".
+3. Restart the app. The chip at the top changes from "Demo mode" to "AI: Groq · openai/gpt-oss-120b".
 
-Free tiers are rate-limited; the app retries briefly and then shows "busy, try again in a minute".
+Free tiers are rate-limited per model. When the main model is busy the app automatically falls back to
+`openai/gpt-oss-20b`, then `qwen/qwen3.8-27b` (`GROQ_FALLBACK_MODELS`), and only then shows "busy, try again in a minute".
 Google Gemini also has a free tier: `LLM_PROVIDER=gemini` and `GEMINI_API_KEY`.
 Without a key the app still runs in demo mode: calculators, checks and dispute help work fully;
 policy Q&A and explanations say honestly that they cannot answer.
+
+### Saathi Chat: RAG + MCP + guardrails
+
+A general assistant (any topic) on the **Saathi Chat** page and at `POST /chat` (login required).
+
+```
+user message
+  -> input guardrails : rate limit · clean text · redact OTP/PIN/CVV/Aadhaar/PAN/cards/passwords/API keys
+                        · injection rules + Llama Prompt Guard 2 · blocked topics (fraud help, weapons, malware...)
+                        + gpt-oss-safeguard policy classifier · crisis messages get helplines (Tele-MANAS 14416)
+  -> RAG              : knowledge/*.md guides (+ the user's own policy, if selected) from ChromaDB,
+                        screened for injected instructions, passed as delimited DATA with [K1]/[P1] ids
+  -> Groq LLM         : openai/gpt-oss-120b with tool calling (fallback models on rate limits)
+  -> MCP tools        : real MCP server (mcp_server/server.py, stdio) - EMI, prepayment, eligibility,
+                        offer comparison, scam/link checks, grievance contacts, guide + policy search,
+                        policy overview, waiting periods, my tickets. user_id/policy_id are injected by
+                        the app and hidden from the model, so it can't read other users' data.
+                        Tool results are redacted, screened and wrapped as DATA.
+  -> output guardrails: strip HTML/scripts/images · remove secrets & PII · defang untrusted links
+                        · rewrite "guaranteed approval" · catch system-prompt leaks (canary)
+                        · medical/investment/legal disclaimers
+```
+
+The safety models degrade gracefully: if Prompt Guard or the safeguard model is unavailable, the
+deterministic rules still run. Tests: `pytest tests/test_guardrails.py tests/test_assistant.py`
+(offline) and `set SAATHI_LIVE=1 && pytest tests/test_live_integration.py` (real Groq + real MCP).
+The MCP server works with any MCP client: `python -m mcp_server.server`.
+
+To add knowledge, drop a Markdown file with `##` sections into `knowledge/`; it is re-indexed automatically.
+
+### Payments evidence and scam check
+
+* Tickets accept **screenshots/PDFs** (content-verified PNG/JPG/PDF, 5 MB, 6 per ticket) and **pasted SMS**.
+  Text is read (OCR), OTPs/PINs are removed, and the UTR, amount and date found are offered to fill the ticket.
+  The complaint letter lists the evidence, and an **evidence pack ZIP** (letter + files + SHA-256 index) can be downloaded.
+* The **scam check** now also analyses **links** (look-alikes such as `paytrn.com`, brand-stuffed domains,
+  shorteners, IP links, `@` tricks, punycode, throwaway TLDs, plus a blocklist in `knowledge/blocklist.txt` /
+  `data/blocklist.txt`), **phone numbers** (personal mobiles posing as support, foreign numbers) and the
+  **sender** (does the SMS header match the company the message claims to be?). It never claims a link is safe.
+
+### Languages
+
+English, हिन्दी, मराठी, বাংলা, தமிழ், తెలుగు, ગુજરાતી. Chat answers come in the user's language (or the
+script they type in). UI text for the five newer languages comes from `frontend/locales/*.json`, built by
+`python scripts/build_translations.py` (resumable). These are **machine translations - have native speakers
+review them**. Sentences not in the catalog are translated on demand (numbers checked) and cached.
 
 ### Accounts
 
