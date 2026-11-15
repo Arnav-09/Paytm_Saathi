@@ -538,10 +538,10 @@ def render():
     page_header(L("Health insurance", "हेल्थ बीमा"),
                 L("Understand your cover, check claims before you pay, and decode the fine print.",
                   "अपना कवर समझें, भुगतान से पहले क्लेम जाँचें और बारीक शर्तें समझें।"))
-    tabs = st.tabs([L("📄 My policy", "📄 मेरी पॉलिसी"), L("💬 Ask Saathi", "💬 साथी से पूछें"),
+    tabs = st.tabs([L("📄 My policy", "📄 मेरी पॉलिसी"),
                     L("🧾 Claim Pre-Flight", "🧾 क्लेम प्री-फ्लाइट"),
                     L("🏥 Claim Readiness", "🏥 क्लेम तत्परता"),
                     L("🔍 Explain a clause", "🔍 क्लॉज़ समझें")])
-    for tab, fn in zip(tabs, (tab_policy, tab_ask, tab_claim, tab_readiness, tab_explain)):
+    for tab, fn in zip(tabs, (tab_policy, tab_claim, tab_readiness, tab_explain)):
         with tab:
             fn()
