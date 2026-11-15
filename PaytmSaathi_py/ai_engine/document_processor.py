@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Union
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 
 from .exceptions import (
     EmptyPDFError,

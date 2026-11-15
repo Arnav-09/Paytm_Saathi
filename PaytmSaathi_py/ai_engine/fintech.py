@@ -594,7 +594,7 @@ def add_attachment(ticket_id: str, user_id: str, filename: str, data: bytes,
     if run_ocr:
         try:
             if ext == ".pdf":
-                import fitz  # PyMuPDF
+                import pymupdf as fitz  # PyMuPDF
 
                 with fitz.open(stream=data, filetype="pdf") as doc:
                     text = "\n".join(page.get_text("text") for page in doc)[:6000]
