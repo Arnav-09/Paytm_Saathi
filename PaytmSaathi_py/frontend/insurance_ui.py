@@ -1,5 +1,4 @@
-"""Insurance journey: my policy (coverage at a glance + waiting countdown), Ask Saathi,
-Claim Pre-Flight (estimate, room what-if, documents), explain a clause."""
+"""Insurance journey: policy overview, Claim Pre-Flight, and clause explanations."""
 
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ from ai_engine import (
     ClaimContext,
     HospitalBill,
     accounts,
-    ask_policy_question,
     estimate_claim_payout,
     explain_clause_text,
     explain_policy_clause,
@@ -132,75 +130,6 @@ def _upload_policy():
             accounts.link_policy(uid(), pid)
             st.session_state["policy_id"] = pid
             st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# Ask Saathi
-# ---------------------------------------------------------------------------
-FOLLOW_UPS = [
-    (("room", "icu", "rent"), [("Does the limit apply to ICU too?", "क्या यह सीमा आईसीयू पर भी लागू है?"),
-                               ("What happens if I choose a costlier room?", "महँगा कमरा लेने पर क्या होगा?")]),
-    (("wait", "pre-existing", "ped"), [("Are accidents covered from day one?", "क्या दुर्घटना पहले दिन से कवर है?"),
-                                        ("Which diseases have a waiting period?", "किन बीमारियों पर प्रतीक्षा अवधि है?")]),
-    (("claim", "cashless", "reimburse"), [("Which documents do I need for a claim?", "क्लेम के लिए कौन से दस्तावेज़ चाहिए?"),
-                                          ("How long do I have to submit a claim?", "क्लेम जमा करने की समय-सीमा क्या है?")]),
-]
-DEFAULT_SUGGESTIONS = [("What is my room rent limit?", "मेरे कमरे के किराए की सीमा क्या है?"),
-                       ("What is not covered?", "क्या कवर नहीं है?"),
-                       ("What is the waiting period for pre-existing diseases?", "पहले से मौजूद बीमारियों की प्रतीक्षा अवधि क्या है?")]
-
-
-def _suggestions(last_question: str | None):
-    if last_question:
-        q = last_question.lower()
-        for keys, items in FOLLOW_UPS:
-            if any(k in q for k in keys):
-                return items
-        return [("What is not covered?", "क्या कवर नहीं है?"), ("How do I make a cashless claim?", "कैशलेस क्लेम कैसे करें?")]
-    return DEFAULT_SUGGESTIONS
-
-
-def tab_ask():
-    if not need_policy():
-        return
-    pid = current_policy()
-    if demo_mode():
-        note(L("Demo mode: connect a free AI key (see README) for real answers. Without it, Saathi honestly says it can't answer.",
-               "डेमो मोड: असली उत्तर के लिए मुफ़्त एआई कुंजी जोड़ें (README देखें)। इसके बिना साथी ईमानदारी से बताएगा कि वह जवाब नहीं दे सकता।"))
-    history = st.session_state.setdefault("chat", {}).setdefault(pid, [])
-    for turn in history:
-        with st.chat_message(turn["role"], avatar="🧑" if turn["role"] == "user" else "🛡️"):
-            st.markdown(turn["content"], unsafe_allow_html=True)
-            for s in turn.get("sources") or []:
-                head = f"📄 {L('Page', 'पेज')} {s.page_number}" + (f" · {L('Clause', 'क्लॉज़')} {s.clause_reference}" if s.clause_reference else "")
-                st.markdown(f'<div class="ps-note"><b>{esc(head)}</b><br>{esc(s.quoted_text)}</div>', unsafe_allow_html=True)
-
-    last_q = next((t["content"] for t in reversed(history) if t["role"] == "user"), None)
-    clicked = None
-    chips = _suggestions(last_q)
-    cols = st.columns(len(chips) + (1 if history else 0))
-    for i, (col, (en, hi)) in enumerate(zip(cols, chips)):
-        if col.button(L(en, hi), key=f"sg_{len(history)}_{i}", width="stretch"):
-            clicked = L(en, hi)
-    if history and cols[-1].button(L("🪄 Explain simpler", "🪄 और आसान बताइए"), key=f"simpler_{len(history)}", width="stretch"):
-        clicked = L("Explain your previous answer in simpler words with a small example.",
-                    "अपने पिछले उत्तर को और आसान शब्दों में एक छोटे उदाहरण के साथ समझाइए।")
-
-    question = st.chat_input(L("Ask anything about your policy…", "अपनी पॉलिसी के बारे में कुछ भी पूछें…")) or clicked
-    if question:
-        history.append({"role": "user", "content": esc(question)})
-        with st.spinner(L("Reading your policy…", "आपकी पॉलिसी पढ़ रहे हैं…")):
-            resp = run(ask_policy_question, pid, question, f"{pid}-ui", lang())
-        if resp:
-            kind, label = {"high": ("ok", L("High confidence", "उच्च भरोसा")),
-                           "medium": ("warn", L("Medium confidence", "मध्यम भरोसा")),
-                           "low": ("bad", L("Low confidence", "कम भरोसा"))}[resp.confidence.value]
-            history.append({"role": "assistant", "sources": resp.sources,
-                            "content": esc(resp.answer).replace("\n", "<br>") + "<br><br>" + pill(label, kind)})
-        st.rerun()
-    if history and st.button(L("Clear chat", "चैट साफ़ करें"), key="chat_clear"):
-        st.session_state["chat"][pid] = []
-        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -428,8 +357,8 @@ def render():
     page_header(L("Health insurance", "हेल्थ बीमा"),
                 L("Understand your cover, check claims before you pay, and decode the fine print.",
                   "अपना कवर समझें, भुगतान से पहले क्लेम जाँचें और बारीक शर्तें समझें।"))
-    tabs = st.tabs([L("📄 My policy", "📄 मेरी पॉलिसी"), L("💬 Ask Saathi", "💬 साथी से पूछें"),
+    tabs = st.tabs([L("📄 My policy", "📄 मेरी पॉलिसी"),
                     L("🧾 Claim Pre-Flight", "🧾 क्लेम प्री-फ्लाइट"), L("🔍 Explain a clause", "🔍 क्लॉज़ समझें")])
-    for tab, fn in zip(tabs, (tab_policy, tab_ask, tab_claim, tab_explain)):
+    for tab, fn in zip(tabs, (tab_policy, tab_claim, tab_explain)):
         with tab:
             fn()
