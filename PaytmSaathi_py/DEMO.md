@@ -94,7 +94,9 @@ Paytm_Saathi/
 │   └── blocklist.txt
 ├── samples/                   # Demo files
 │   ├── demo_health_policy.pdf
-│   └── make_demo_policy.py
+│   ├── make_demo_policy.py
+│   ├── demo_hospital_bill.pdf # Fictional bill for extraction testing
+│   └── make_demo_hospital_bill.py
 ├── scripts/                   # Utility scripts
 │   ├── process_policy.py      # CLI for ingesting a policy PDF
 │   └── build_translations.py  # Build translation JSON files
