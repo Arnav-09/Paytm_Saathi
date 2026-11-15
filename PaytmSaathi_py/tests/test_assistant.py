@@ -141,7 +141,7 @@ def test_tool_output_with_injected_instructions_is_blocked():
 def test_tool_loop_is_bounded():
     a, llm = make([tool_call("calculate_emi", {}, f"t{i}") for i in range(asst.MAX_TOOL_ROUNDS)] + [answer("final")])
     r = a.chat("loop forever", [], CTX)
-    assert r.answer == "final" and llm.calls[-1]["tools"] is None and len(llm.calls) == asst.MAX_TOOL_ROUNDS + 1
+    assert r.answer.startswith("final") and llm.calls[-1]["tools"] is None and len(llm.calls) == asst.MAX_TOOL_ROUNDS + 1
 
 
 def test_indirect_injection_in_policy_is_dropped():
@@ -190,13 +190,13 @@ def test_llm_failure_degrades_gracefully():
 def test_tools_unavailable_still_answers():
     a, llm = make([answer("Answer without tools.")], bridge=FakeBridge(fail=True))
     r = a.chat("emi?", [], CTX)
-    assert r.answer == "Answer without tools." and "tools_unavailable" in r.degraded and llm.calls[0]["tools"] is None
+    assert r.answer.startswith("Answer without tools.") and "tools_unavailable" in r.degraded and llm.calls[0]["tools"] is None
 
 
 def test_empty_reply_retries_without_tools():
     a, llm = make([answer(""), answer("Here you go.")])
     r = a.chat("hi", [], CTX)
-    assert r.answer == "Here you go." and llm.calls[1]["tools"] is None
+    assert r.answer.startswith("Here you go.") and llm.calls[1]["tools"] is None
 
 
 def test_language_follows_the_script_the_user_writes_in():
@@ -220,3 +220,73 @@ def test_rate_limit(monkeypatch):
     assert not a.chat("first", [], CTX).blocked
     r = a.chat("second", [], CTX)
     assert r.blocked and r.guard_notes[0].kind == "too_many_messages"
+
+
+
+# ----------------------------- session tools, citations, grounding ----------
+def local_tool(name, output):
+    calls = []
+
+    def fn(**kw):
+        calls.append(kw)
+        return json.loads(json.dumps(output))
+
+    return {name: ({"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}}, fn)}, calls
+
+
+def test_session_tool_runs_in_process_and_statement_citations_become_sources():
+    tools, calls = local_tool("money_report", {"alerts": [{"title": "dup", "evidence": ["S1"]}], "citations": [
+        {"ref": "S1", "kind": "statement", "title": "Swiggy", "detail": "2026-11-08 · ₹456.00 · bank.csv row 26", "text": "row 26"},
+        {"ref": "S2", "kind": "statement", "title": "Uber", "detail": "x", "text": "y"}]})
+    bridge = FakeBridge()
+    # The model never asks for the tool: the app runs it anyway because the question is about the user's money.
+    a, llm = make([answer("You were charged twice at Swiggy [S1].")], bridge=bridge)
+    r = a.chat("find duplicate charges", [], CTX, local_tools=tools)
+    assert calls == [{}] and bridge.calls == []  # ran once, in-process, not over MCP
+    sent = llm.calls[0]["messages"]
+    assert sent[-2]["tool_calls"][0]["function"]["name"] == "money_report" and "<<TOOL_RESULT>>" in sent[-1]["content"]
+    assert [s.ref for s in r.sources] == ["S1"] and r.sources[0].kind == "statement"  # only the cited one
+    assert "citations" not in sent[-1]["content"]  # citation details are not sent to the model
+    assert r.grounding == "document" and "money" in r.cards
+    assert "informational only" in r.answer  # money disclaimer added by code
+
+
+def test_answers_without_citations_are_labelled_general_guidance():
+    a, _ = make([answer("Photosynthesis turns light into food.")])
+    r = a.chat("explain photosynthesis", [], CTX)
+    assert r.grounding == "general" and "General guidance - not based on your uploaded documents" in r.answer
+
+
+def test_tool_answers_without_documents_are_labelled_calculated_and_loan_disclaimer_added():
+    bridge = FakeBridge(result={"inputs": {"monthly_income": 85000, "loan_amount": 500000, "tenure_months": 36, "annual_rate_pct": 13.5},
+                                "emi": 16967.64, "status": "Tight"})
+    a, _ = make([tool_call("loan_preflight_check", {"monthly_income": 85000}), answer("Your EMI would be ₹16,968 (Tight).")], bridge=bridge)
+    bridge.openai_tools = lambda: [{"type": "function", "function": {"name": "loan_preflight_check", "description": "", "parameters": {"type": "object"}}}]
+    r = a.chat("Can I afford a 5 lakh loan?", [], CTX)
+    assert r.grounding == "calculated" and "Calculated from the numbers you gave" in r.answer
+    assert "not a loan approval, credit decision, or guarantee of eligibility" in r.answer
+    assert "loan" in r.cards and r.artifacts["loan_inputs"]["loan_amount"] == 500000
+
+
+def test_document_citations_from_rejection_decoder():
+    tools, _ = local_tool("decode_my_documents", {"reasons": [{"ref": "D1", "title": "High FOIR"}], "citations": [
+        {"ref": "D1", "kind": "document", "title": "letter.pdf", "detail": "letter.pdf page 1, line 6", "text": "FOIR above policy"}]})
+    a, _ = make([tool_call("decode_my_documents", {}), answer("The lender says your EMIs are too high [D1].")])
+    r = a.chat("why was my loan rejected?", [], CTX, local_tools=tools)
+    assert r.sources[0].ref == "D1" and r.sources[0].detail.endswith("line 6") and "rejection" in r.cards
+
+
+def test_session_note_reaches_the_system_prompt():
+    a, llm = make([answer("ok")])
+    a.chat("hi", [], CTX.model_copy(update={"session_note": "Statement uploaded: bank.csv"}))
+    assert "Statement uploaded: bank.csv" in llm.calls[0]["messages"][0]["content"]
+
+
+def test_statement_answer_without_citation_tags_still_gets_evidence_and_document_label():
+    tools, _ = local_tool("money_report", {"alerts": [], "citations": [
+        {"ref": "S2", "kind": "statement", "title": "Croma", "detail": "2026-10-29 · ₹12,999.00 · nov.pdf page 1, line 14", "text": "x"},
+        {"ref": "S1", "kind": "statement", "title": "Late fee", "detail": "2026-11-06 · ₹1,000.00 · nov.pdf page 1, line 16", "text": "y"}]})
+    a, _ = make([answer("Your bill rose because of a Croma purchase and a late fee.")])  # no [S#] tags
+    r = a.chat("why did my bill increase?", [], CTX, local_tools=tools)
+    assert r.grounding == "document" and "Based on your uploaded statement/document" in r.answer
+    assert [s.ref for s in r.sources] == ["S1", "S2"] and "General guidance" not in r.answer

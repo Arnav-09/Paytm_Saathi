@@ -493,3 +493,326 @@ def eligibility_levers(applicant: LoanApplicant) -> list[EligibilityLever]:
                                     change=round(res.max_eligible_amount - base.max_eligible_amount, 2),
                                     decision=res.decision))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Loan Pre-Flight: affordability + EMI stress test + rejection decoder
+# (rules and thresholds come from knowledge/loan_preflight_rules.json - never from the LLM)
+# ---------------------------------------------------------------------------
+import json as _json
+from functools import lru_cache as _lru_cache
+from pathlib import Path as _Path
+
+from .utils import inr  # noqa: E402
+
+PREFLIGHT_RULES_FILE = _Path(__file__).resolve().parent.parent / "knowledge" / "loan_preflight_rules.json"
+SCORE_BANDS = ("750+", "700-749", "650-699", "<650", "unknown")
+
+
+@_lru_cache(maxsize=1)
+def preflight_rules() -> dict:
+    return _json.loads(PREFLIGHT_RULES_FILE.read_text(encoding="utf-8"))
+
+
+class LoanPreflightInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    monthly_income: float
+    existing_emis: float = 0.0
+    card_dues_monthly: float = 0.0  # what you pay towards credit cards each month
+    monthly_expenses: Optional[float] = None  # rent, food, bills (not EMIs); optional
+    loan_amount: float
+    tenure_months: int
+    annual_rate_pct: float
+    employment_type: str = "salaried"
+    loan_type: str = "personal"
+    credit_score_range: str = "unknown"  # 750+ | 700-749 | 650-699 | <650 | unknown
+    savings: Optional[float] = None
+    card_limit: Optional[float] = None
+    card_outstanding: Optional[float] = None
+    has_overdue: bool = False
+    recent_applications: int = 0
+
+
+class CashFlowSnapshot(BaseModel):
+    income: float
+    expenses: float
+    existing_emis: float
+    card_dues: float
+    new_emi: float
+    buffer: float
+
+
+class StressScenario(BaseModel):
+    name: str
+    detail: str
+    emi: float
+    dti_pct: float
+    buffer: float
+    status: str  # safe | tight | high_risk
+
+
+class RiskFactor(BaseModel):
+    code: str
+    title: str
+    detail: str
+    actions: list[str]
+    severity: str  # high | medium | low
+
+
+class LoanPreflightResult(BaseModel):
+    inputs: LoanPreflightInput
+    emi: float
+    total_interest: float
+    total_payment: float
+    dti_before_pct: float
+    dti_after_pct: float
+    before: CashFlowSnapshot
+    after: CashFlowSnapshot
+    buffer_after_pct: float
+    status: str  # safe | tight | high_risk
+    status_reason: str
+    affordable_loan_amount: float
+    scenarios: list[StressScenario] = Field(default_factory=list)
+    risk_factors: list[RiskFactor] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    documents: list[dict] = Field(default_factory=list)
+    explanations: dict = Field(default_factory=dict)
+    assumptions: list[str] = Field(default_factory=list)
+    grounding: str = "general guidance from your inputs (no document used)"
+    disclaimer: str = ""
+
+
+STATUS_LABELS = {"safe": "Safe", "tight": "Tight", "high_risk": "High Risk"}
+
+
+def _validate_preflight(inp: LoanPreflightInput) -> None:
+    if inp.monthly_income <= 0:
+        raise CalculationInputError("Monthly income must be more than zero.")
+    if min(inp.existing_emis, inp.card_dues_monthly, inp.recent_applications) < 0 or (inp.monthly_expenses or 0) < 0 \
+            or (inp.savings or 0) < 0:
+        raise CalculationInputError("Amounts cannot be negative.")
+    if inp.loan_amount <= 0 or inp.tenure_months <= 0:
+        raise CalculationInputError("Loan amount and tenure must be more than zero.")
+    if not 0 <= inp.annual_rate_pct <= 60:
+        raise CalculationInputError("Enter the interest rate quoted to you (0-60% a year).")
+    if inp.credit_score_range not in SCORE_BANDS:
+        raise CalculationInputError("Credit score range must be one of: " + ", ".join(SCORE_BANDS))
+
+
+def _status(dti_pct: float, buffer: float, income: float, expenses_known: bool) -> tuple[str, str]:
+    levels = preflight_rules()["stress_levels"]
+    buffer_pct = 100 * buffer / income
+    if buffer < 0:
+        return "high_risk", "Your monthly commitments would be more than your income."
+    if dti_pct <= levels["safe"]["max_dti_pct"] and (not expenses_known or buffer_pct >= levels["safe"]["min_buffer_pct_of_income"]):
+        return "safe", (f"EMIs would take {dti_pct:.0f}% of income (safe up to {levels['safe']['max_dti_pct']}%)"
+                        + (f" and {buffer_pct:.0f}% of income would be left over." if expenses_known else "."))
+    if dti_pct <= levels["tight"]["max_dti_pct"] and (not expenses_known or buffer_pct >= levels["tight"]["min_buffer_pct_of_income"]):
+        return "tight", f"EMIs would take {dti_pct:.0f}% of income, leaving little room for surprises."
+    return "high_risk", f"EMIs would take {dti_pct:.0f}% of income, above the {levels['tight']['max_dti_pct']}% level lenders usually accept."
+
+
+def _snapshot(inp: LoanPreflightInput, new_emi: float, income: Optional[float] = None) -> CashFlowSnapshot:
+    income = inp.monthly_income if income is None else income
+    expenses = inp.monthly_expenses or 0.0
+    buffer = income - expenses - inp.existing_emis - inp.card_dues_monthly - new_emi
+    return CashFlowSnapshot(income=round(income, 2), expenses=round(expenses, 2), existing_emis=round(inp.existing_emis, 2),
+                            card_dues=round(inp.card_dues_monthly, 2), new_emi=round(new_emi, 2), buffer=round(buffer, 2))
+
+
+def _dti(inp: LoanPreflightInput, emi: float, income: Optional[float] = None) -> float:
+    income = inp.monthly_income if income is None else income
+    return round(100 * (inp.existing_emis + inp.card_dues_monthly + emi) / income, 1)
+
+
+def loan_preflight(inp: LoanPreflightInput, shock_amount: Optional[float] = None) -> LoanPreflightResult:
+    """Deterministic affordability check, stress test and risk factors for a proposed loan."""
+    _validate_preflight(inp)
+    rules = preflight_rules()
+    summary = loan_summary(inp.loan_amount, inp.annual_rate_pct, inp.tenure_months)
+    emi = summary.emi
+    expenses_known = inp.monthly_expenses is not None
+    before, after = _snapshot(inp, 0.0), _snapshot(inp, emi)
+    dti_before, dti_after = _dti(inp, 0.0), _dti(inp, emi)
+    status, reason = _status(dti_after, after.buffer, inp.monthly_income, expenses_known)
+
+    safe_dti = rules["stress_levels"]["safe"]["max_dti_pct"]
+    max_safe_emi = max(inp.monthly_income * safe_dti / 100 - inp.existing_emis - inp.card_dues_monthly, 0.0)
+    affordable = max_principal_for_emi(max_safe_emi, inp.annual_rate_pct, inp.tenure_months)
+
+    res = LoanPreflightResult(
+        inputs=inp, emi=emi, total_interest=summary.total_interest, total_payment=summary.total_payment,
+        dti_before_pct=dti_before, dti_after_pct=dti_after, before=before, after=after,
+        buffer_after_pct=round(100 * after.buffer / inp.monthly_income, 1), status=status, status_reason=reason,
+        affordable_loan_amount=round(affordable, -3) if affordable >= 1000 else round(affordable, 2),
+        documents=required_documents(inp.loan_type if inp.loan_type in LENDING_RULES else "personal", inp.employment_type),
+        explanations=dict(rules["explanations"]), disclaimer=rules["disclaimer"])
+    if not expenses_known:
+        res.assumptions.append("Monthly expenses were not given, so the leftover money may be overstated.")
+    res.assumptions.append("Uses the interest rate you entered; the lender's actual rate may differ.")
+
+    # Stress scenarios
+    sc = rules["stress_scenarios"]
+    res.scenarios.append(StressScenario(name="As planned", detail=f"{inp.annual_rate_pct}% for {inp.tenure_months} months",
+                                        emi=emi, dti_pct=dti_after, buffer=after.buffer, status=status))
+    hi_rate = inp.annual_rate_pct + sc["rate_increase_pct_points"]
+    emi_hi = calculate_emi(inp.loan_amount, hi_rate, inp.tenure_months)
+    snap = _snapshot(inp, emi_hi)
+    res.scenarios.append(StressScenario(name=f"Rate +{sc['rate_increase_pct_points']}%", detail=f"if a floating rate rises to {hi_rate}%",
+                                        emi=emi_hi, dti_pct=_dti(inp, emi_hi), buffer=snap.buffer,
+                                        status=_status(_dti(inp, emi_hi), snap.buffer, inp.monthly_income, expenses_known)[0]))
+    low_income = inp.monthly_income * (1 - sc["income_drop_pct"] / 100)
+    snap = _snapshot(inp, emi, low_income)
+    res.scenarios.append(StressScenario(name=f"Income -{sc['income_drop_pct']}%", detail=f"if income falls to {inr(low_income)}",
+                                        emi=emi, dti_pct=_dti(inp, emi, low_income), buffer=snap.buffer,
+                                        status=_status(_dti(inp, emi, low_income), snap.buffer, low_income, expenses_known)[0]))
+    shock = shock_amount if shock_amount is not None else sc["default_shock_rupees"]
+    if shock < 0:
+        raise CalculationInputError("The emergency amount cannot be negative.")
+    savings = inp.savings or 0.0
+    gap = shock - savings - max(after.buffer, 0)
+    if gap <= 0:
+        detail, shock_status = f"{inr(shock)} emergency covered by savings and this month's leftover", status
+    elif after.buffer > 0:
+        months = gap / after.buffer
+        detail, shock_status = (f"{inr(shock)} emergency leaves a {inr(gap)} gap; about {months:.1f} months of leftover "
+                                "money to recover"), "tight" if months <= 3 else "high_risk"
+    else:
+        detail, shock_status = f"{inr(shock)} emergency leaves a {inr(gap)} gap with no monthly leftover to recover", "high_risk"
+    res.scenarios.append(StressScenario(name="One-time emergency", detail=detail, emi=emi, dti_pct=dti_after,
+                                        buffer=round(after.buffer - shock + savings, 2), status=shock_status))
+    if inp.savings is None:
+        res.assumptions.append("Savings were not given, so the emergency scenario assumes none.")
+
+    # Risk factors from the user's own data only
+    rf, reasons = rules["risk_factors"], {r["code"]: r for r in rules["rejection_reasons"]}
+
+    def add(code: str, detail: str, severity: str) -> None:
+        r = reasons[code]
+        res.risk_factors.append(RiskFactor(code=code, title=r["title"], detail=detail, actions=r["actions"], severity=severity))
+
+    if dti_after > rf["high_dti_pct"]:
+        add("high_foir", f"With this loan, {dti_after:.0f}% of your income would go to EMIs and card dues.", "high")
+    if inp.credit_score_range in ("<650", "650-699"):
+        band = next(b for b in rules["credit_score_bands"] if b["band"] == inp.credit_score_range)
+        add("low_credit_score", f"Your score range is {inp.credit_score_range}. {band['note']}", "high" if inp.credit_score_range == "<650" else "medium")
+    if inp.card_limit and inp.card_outstanding is not None and inp.card_limit > 0:
+        util = 100 * inp.card_outstanding / inp.card_limit
+        if util > rf["high_card_utilization_pct"]:
+            add("high_utilization", f"Your card usage is {util:.0f}% of the limit.", "medium")
+    if inp.has_overdue:
+        add("overdue_or_default", "You told us you have an overdue payment.", "high")
+    if inp.recent_applications >= rf["many_recent_applications"]:
+        add("too_many_enquiries", f"You have applied {inp.recent_applications} times recently.", "medium")
+    if inp.employment_type == "self_employed":
+        add("income_or_employment", "Self-employed applicants are usually asked for 2-3 years of ITR and business proof.", "low")
+
+    # Actions
+    if status != "safe" and affordable > 0:
+        res.actions.append(f"A loan of about {inr(res.affordable_loan_amount)} at this rate and tenure would keep EMIs within "
+                           f"{safe_dti}% of income.")
+    longer = min(inp.tenure_months + 24, LENDING_RULES.get(inp.loan_type, LENDING_RULES["personal"])["max_tenure_m"])
+    if status != "safe" and longer > inp.tenure_months:
+        emi_long = calculate_emi(inp.loan_amount, inp.annual_rate_pct, longer)
+        extra = emi_long * longer - emi * inp.tenure_months
+        res.actions.append(f"A {longer}-month tenure lowers the EMI to {inr(emi_long)} but costs {inr(extra)} more interest.")
+    for f in res.risk_factors:
+        res.actions.append(f.actions[0])
+    if not res.actions:
+        res.actions.append("Your numbers look comfortable. Compare offers by total cost (interest + fees) before applying.")
+    res.actions = list(dict.fromkeys(res.actions))
+    return res
+
+
+def loan_what_if(inp: LoanPreflightInput, tenure_months: Optional[int] = None, loan_amount: Optional[float] = None,
+                 annual_rate_pct: Optional[float] = None, shock_amount: Optional[float] = None,
+                 income_drop_pct: Optional[float] = None) -> dict:
+    """Compare the plan with one or more changes (tenure, amount, rate, emergency, income drop)."""
+    base = loan_preflight(inp)
+    changes = {}
+    if tenure_months is not None:
+        changes["tenure_months"] = int(tenure_months)
+    if loan_amount is not None:
+        changes["loan_amount"] = float(loan_amount)
+    if annual_rate_pct is not None:
+        changes["annual_rate_pct"] = float(annual_rate_pct)
+    if income_drop_pct is not None:
+        if not 0 <= income_drop_pct < 100:
+            raise CalculationInputError("Income drop must be between 0 and 99%.")
+        changes["monthly_income"] = inp.monthly_income * (1 - income_drop_pct / 100)
+    variant = loan_preflight(inp.model_copy(update=changes), shock_amount=shock_amount)
+
+    def view(r: LoanPreflightResult) -> dict:
+        return {"emi": r.emi, "total_interest": r.total_interest, "dti_after_pct": r.dti_after_pct,
+                "monthly_leftover": r.after.buffer, "status": STATUS_LABELS[r.status],
+                "emergency": next((s.model_dump() for s in r.scenarios if s.name == "One-time emergency"), None)}
+
+    return {"current_plan": view(base), "what_if": view(variant), "changes": changes,
+            "emi_difference": round(variant.emi - base.emi, 2),
+            "interest_difference": round(variant.total_interest - base.total_interest, 2),
+            "disclaimer": base.disclaimer}
+
+
+class DecodedReason(BaseModel):
+    code: str
+    title: str
+    explanation: str
+    actions: list[str]
+    quote: str
+    location: str  # "rejection_letter.pdf page 1, line 9"
+
+
+class RejectionDecode(BaseModel):
+    source: str
+    reasons: list[DecodedReason] = Field(default_factory=list)
+    message: str = ""
+    disclaimer: str = ""
+
+
+def document_lines(filename: str, data: bytes) -> list[tuple[str, str]]:
+    """(location, text) lines from a PDF, image (OCR) or text document."""
+    name = _Path(filename or "document").name
+    ext = _Path(name).suffix.lower()
+    out: list[tuple[str, str]] = []
+    if ext == ".pdf":
+        import fitz  # PyMuPDF
+
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            pages = [p.get_text("text") for p in doc]
+        if not any(p.strip() for p in pages):
+            from .fintech import _read_document_text
+
+            pages = [_read_document_text(".pdf", data) or ""]
+    elif ext in (".png", ".jpg", ".jpeg"):
+        from .fintech import _read_document_text
+
+        pages = [_read_document_text(ext, data) or ""]
+    elif ext == ".txt":
+        pages = [data.decode("utf-8", errors="ignore")]
+    else:
+        raise CalculationInputError("Upload the letter or report as PDF, image or text.")
+    for p, text in enumerate(pages, 1):
+        for ln, line in enumerate(text.splitlines(), 1):
+            if line.strip():
+                out.append((f"{name} page {p}, line {ln}" if len(pages) > 1 or ext == ".pdf" else f"{name} line {ln}", line.strip()))
+    return out
+
+
+def decode_rejection(lines: list[tuple[str, str]], source: str = "your document") -> RejectionDecode:
+    """Map phrases in a rejection letter / credit report to plain explanations and next steps (rules file)."""
+    from .guardrails import redact_sensitive
+
+    rules = preflight_rules()
+    out = RejectionDecode(source=source, disclaimer=rules["disclaimer"])
+    for reason in rules["rejection_reasons"]:
+        pats = [re.compile(rf"(?<![a-z]){re.escape(p)}", re.IGNORECASE) for p in reason["patterns"]]
+        hit = next(((loc, text) for loc, text in lines if any(p.search(text) for p in pats)), None)
+        if hit:
+            quote, _ = redact_sensitive(hit[1][:200])
+            out.reasons.append(DecodedReason(code=reason["code"], title=reason["title"], explanation=reason["explanation"],
+                                             actions=reason["actions"], quote=quote, location=hit[0]))
+    if not out.reasons:
+        out.message = ("No common rejection reason was recognised in this document. Ask the lender for the specific "
+                       "reason in writing - you are entitled to know it.")
+    return out

@@ -16,6 +16,9 @@ numpy>=1.24.0
 # Chat assistant tools (Model Context Protocol, 1.x API)
 mcp>=1.2.0,<2
 
+# Use the OS certificate store for HTTPS (fixes CERTIFICATE_VERIFY_FAILED behind antivirus/proxies, and on macOS)
+truststore>=0.9; python_version >= "3.10"
+
 # Backend API
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
@@ -24,6 +27,7 @@ python-multipart>=0.0.9
 # Frontend
 streamlit>=1.35.0
 pandas>=2.0.0
+openpyxl>=3.1  # Excel (.xlsx) statements for Money Clarity
 
 # Testing
 pytest>=8.0.0
