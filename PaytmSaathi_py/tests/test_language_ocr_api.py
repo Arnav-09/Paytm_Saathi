@@ -92,6 +92,20 @@ def test_api_health_and_emi(client):
     assert res.status_code == 200 and res.json()["emi"] == pytest.approx(88848.79, abs=0.01)
 
 
+def test_api_prepayment_includes_penalty_adjusted_savings(client):
+    res = client.post("/lending/prepayment", json={
+        "principal": 1000000, "annual_rate_pct": 9, "tenure_months": 240,
+        "yearly_extra": 50000, "prepayment_penalty_pct": 2,
+        "late_payment_penalty_annual_pct": 18, "late_payment_days": 30,
+        "late_payment_emi_count": 2,
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert data["prepayment_penalty"] > 0
+    assert data["late_payment_penalty"] > 0
+    assert data["net_savings"] == pytest.approx(data["interest_saved"] - data["total_penalties"])
+
+
 def test_api_engine_errors_map_to_http_status(client):
     res = client.post("/lending/emi", json={"principal": 0, "annual_rate_pct": 12, "tenure_months": 12})
     assert res.status_code == 422 and res.json()["error"] == "calculation_input_error"

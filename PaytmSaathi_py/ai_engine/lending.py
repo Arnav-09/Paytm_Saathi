@@ -268,6 +268,9 @@ _EMPLOYMENT_DOCS = {
         {"en": "Last 2-3 years ITR with computation of income", "hi": "पिछले 2-3 साल का आईटीआर"},
         {"en": "Business proof (GST registration / Udyam / shop licence)", "hi": "व्यवसाय का प्रमाण (जीएसटी / उद्यम / दुकान लाइसेंस)"},
         {"en": "Last 12 months business bank statements", "hi": "पिछले 12 महीने का बिज़नेस बैंक स्टेटमेंट"},
+        {"en": "Business turnover proof (GST returns / audited financial statements)", "hi": "व्यवसाय के टर्नओवर का प्रमाण (जीएसटी रिटर्न / ऑडिटेड वित्तीय विवरण)"},
+        {"en": "Certificate of validation", "hi": "सत्यापन प्रमाणपत्र"},
+        {"en": "Proprietor identity proof", "hi": "मालिक की पहचान का प्रमाण"},
     ],
 }
 _LOAN_DOCS = {
@@ -414,19 +417,39 @@ class PrepaymentPlan(BaseModel):
     new_interest: float
     interest_saved: float
     total_prepaid: float
+    prepayment_penalty: float
+    late_payment_penalty: float
+    total_penalties: float
+    net_savings: float
     balance_original: list[float] = Field(default_factory=list)  # balance at the end of each year
     balance_new: list[float] = Field(default_factory=list)
     note: str = ("Assumes prepayments reduce the tenure and the EMI stays the same. "
-                 "Some lenders charge a prepayment fee on fixed-rate loans; floating-rate home loans "
-                 "for individuals usually have none.")
+                 "Prepayment fees and late-payment charges are estimates based on the inputs; "
+                 "actual lender rules may differ.")
 
 
 def prepayment_plan(principal: float, annual_rate_pct: float, tenure_months: int,
                     extra_monthly: float = 0.0, yearly_extra: float = 0.0,
-                    lump_sum: float = 0.0, lump_sum_month: int = 12) -> PrepaymentPlan:
-    """Interest and months saved by paying extra on top of the EMI."""
+                    lump_sum: float = 0.0, lump_sum_month: int = 12,
+                    prepayment_penalty_pct: float = 0.0,
+                    late_payment_penalty_annual_pct: float = 0.0,
+                    late_payment_days: int = 0, late_payment_emi_count: int = 0) -> PrepaymentPlan:
+    """Estimate interest saved and penalty-adjusted savings from extra payments.
+
+    Prepayment fees are a percentage of total extra principal paid. Late charges
+    are prorated simple interest on the specified number of EMIs for the given
+    number of late days.
+    """
     if min(extra_monthly, yearly_extra, lump_sum) < 0:
         raise CalculationInputError("Extra payments cannot be negative.")
+    if not 0 <= prepayment_penalty_pct <= 100:
+        raise CalculationInputError("Prepayment penalty must be between 0 and 100%.")
+    if not 0 <= late_payment_penalty_annual_pct <= 100:
+        raise CalculationInputError("Late-payment penalty rate must be between 0 and 100%.")
+    if not 0 <= late_payment_days <= 365:
+        raise CalculationInputError("Late-payment days must be between 0 and 365.")
+    if not 0 <= late_payment_emi_count <= 12:
+        raise CalculationInputError("Late-payment EMI count must be between 0 and 12.")
     emi = calculate_emi(principal, annual_rate_pct, tenure_months)
     r = annual_rate_pct / 12.0 / 100.0
 
@@ -452,9 +475,17 @@ def prepayment_plan(principal: float, annual_rate_pct: float, tenure_months: int
 
     m0, i0, _, y0 = simulate(False)
     m1, i1, prepaid, y1 = simulate(True)
+    prepayment_fee = round(prepaid * prepayment_penalty_pct / 100.0, 2)
+    late_fee = round(emi * late_payment_emi_count * late_payment_penalty_annual_pct / 100.0
+                     * late_payment_days / 365.0, 2)
+    total_penalties = round(prepayment_fee + late_fee, 2)
+    interest_saved = round(i0 - i1, 2)
     return PrepaymentPlan(emi=emi, original_months=m0, new_months=m1, months_saved=m0 - m1,
-                          original_interest=i0, new_interest=i1, interest_saved=round(i0 - i1, 2),
-                          total_prepaid=prepaid, balance_original=y0, balance_new=y1)
+                          original_interest=i0, new_interest=i1, interest_saved=interest_saved,
+                          total_prepaid=prepaid, prepayment_penalty=prepayment_fee,
+                          late_payment_penalty=late_fee, total_penalties=total_penalties,
+                          net_savings=round(interest_saved - total_penalties, 2),
+                          balance_original=y0, balance_new=y1)
 
 
 # ---------------------------------------------------------------------------

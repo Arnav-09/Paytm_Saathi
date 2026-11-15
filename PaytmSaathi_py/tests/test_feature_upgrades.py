@@ -92,11 +92,33 @@ def test_prepayment_saves_interest_and_months():
     assert plan.original_months == 240
     assert plan.new_months < 240 and plan.months_saved == 240 - plan.new_months
     assert plan.interest_saved > 0 and plan.new_interest < plan.original_interest
+    assert plan.net_savings == pytest.approx(plan.interest_saved - plan.total_penalties)
     assert plan.balance_new[-1] == 0
     none = lending.prepayment_plan(1_000_000, 9, 240)
     assert none.months_saved == 0 and none.interest_saved == pytest.approx(0, abs=1)
     with pytest.raises(CalculationInputError):
         lending.prepayment_plan(1_000_000, 9, 240, extra_monthly=-1)
+
+
+def test_prepayment_penalties_are_included_in_net_savings():
+    plan = lending.prepayment_plan(
+        1_000_000, 9, 240, yearly_extra=50_000, prepayment_penalty_pct=2,
+        late_payment_penalty_annual_pct=18, late_payment_days=30, late_payment_emi_count=2)
+    assert plan.prepayment_penalty == pytest.approx(plan.total_prepaid * 0.02)
+    assert plan.late_payment_penalty == pytest.approx(plan.emi * 2 * 0.18 * 30 / 365, abs=0.01)
+    assert plan.total_penalties == pytest.approx(plan.prepayment_penalty + plan.late_payment_penalty)
+    assert plan.net_savings == pytest.approx(plan.interest_saved - plan.total_penalties)
+    with pytest.raises(CalculationInputError):
+        lending.prepayment_plan(1_000_000, 9, 240, prepayment_penalty_pct=101)
+    with pytest.raises(CalculationInputError):
+        lending.prepayment_plan(1_000_000, 9, 240, late_payment_days=366)
+
+
+def test_self_employed_documents_include_turnover_validation_and_proprietor_id():
+    docs = [doc["en"] for doc in lending.required_documents("personal", "self_employed")]
+    assert any("turnover" in doc.lower() for doc in docs)
+    assert "Certificate of validation" in docs
+    assert "Proprietor identity proof" in docs
 
 
 def test_eligibility_levers_show_improvements():

@@ -54,19 +54,38 @@ def tab_emi():
     extra_m = p1.number_input(L("Extra every month (₹)", "हर महीने अतिरिक्त (₹)"), 0.0, 10000000.0, 0.0, 500.0, key="pp_m")
     extra_y = p2.number_input(L("Extra once a year, e.g. bonus (₹)", "साल में एक बार अतिरिक्त, जैसे बोनस (₹)"), 0.0, 100000000.0, 50000.0, 5000.0, key="pp_y")
     lump = p3.number_input(L("One-time lump sum (₹)", "एकमुश्त राशि (₹)"), 0.0, 100000000.0, 0.0, 10000.0, key="pp_l")
-    plan = run(lending.prepayment_plan, principal, rate, months, extra_m, extra_y, lump, 12)
+    st.markdown(f"##### {L('Penalty assumptions', 'जुर्माने की मान्यताएँ')}")
+    st.caption(L("The late-payment estimate uses simple interest: EMI × late EMIs × annual penalty rate × days late ÷ 365. Actual lender charges vary.",
+                 "देर से भुगतान का अनुमान साधारण ब्याज से है: ईएमआई × देर वाली किस्तें × सालाना जुर्माना दर × देरी के दिन ÷ 365। वास्तविक शुल्क अलग हो सकते हैं।"))
+    q1, q2, q3, q4 = st.columns(4)
+    prepayment_penalty = q1.number_input(
+        L("Prepayment penalty (% of extra paid)", "प्रीपेमेंट जुर्माना (अतिरिक्त भुगतान का %)"),
+        0.0, 100.0, 0.0, 0.25, key="pp_penalty_pct")
+    late_penalty_rate = q2.number_input(
+        L("Late-payment penalty (% p.a.)", "देर से भुगतान जुर्माना (% सालाना)"),
+        0.0, 100.0, 0.0, 0.25, key="pp_late_rate")
+    late_emi_count = q3.number_input(
+        L("Number of late EMIs", "देर वाली ईएमआई की संख्या"), 0, 12, 0, key="pp_late_count")
+    late_days = q4.number_input(
+        L("Days late", "देरी के दिन"), 0, 365, 0, key="pp_late_days")
+    plan = run(lending.prepayment_plan, principal, rate, months, extra_m, extra_y, lump, 12,
+               prepayment_penalty, late_penalty_rate, int(late_days), int(late_emi_count))
     if plan:
-        k = st.columns(3)
+        k = st.columns(5)
         k[0].metric(L("Interest saved", "बचा ब्याज"), inr(plan.interest_saved))
-        k[1].metric(L("Loan ends earlier by", "लोन इतना पहले खत्म"), _years(plan.months_saved) if plan.months_saved else "—")
-        k[2].metric(L("New tenure", "नई अवधि"), _years(plan.new_months))
+        k[1].metric(L("Total penalties", "कुल जुर्माना"), inr(plan.total_penalties))
+        k[2].metric(L("Net savings after penalties", "जुर्माने के बाद शुद्ध बचत"), inr(plan.net_savings))
+        k[3].metric(L("Loan ends earlier by", "लोन इतना पहले खत्म"), _years(plan.months_saved) if plan.months_saved else "—")
+        k[4].metric(L("New tenure", "नई अवधि"), _years(plan.new_months))
+        st.caption(L(f"Prepayment fee: {inr(plan.prepayment_penalty)} · Late-payment penalty: {inr(plan.late_payment_penalty)}. Net savings = interest saved − both penalties.",
+                     f"प्रीपेमेंट शुल्क: {inr(plan.prepayment_penalty)} · देर से भुगतान जुर्माना: {inr(plan.late_payment_penalty)}। शुद्ध बचत = बचा ब्याज − दोनों जुर्माने।"))
         n = max(len(plan.balance_original), len(plan.balance_new))
         chart = pd.DataFrame({
             L("Without prepayment", "प्रीपेमेंट के बिना"): plan.balance_original + [0.0] * (n - len(plan.balance_original)),
             L("With prepayment", "प्रीपेमेंट के साथ"): plan.balance_new + [0.0] * (n - len(plan.balance_new)),
         }, index=pd.Index(range(1, n + 1), name=L("Year", "साल")))
         st.line_chart(chart, color=[NAVY, CYAN], y_label=L("Loan balance (₹)", "बकाया लोन (₹)"))
-        st.caption(L(plan.note, "मान्यता: प्रीपेमेंट से अवधि घटती है और ईएमआई वही रहती है। फिक्स्ड रेट लोन पर कुछ लेंडर प्रीपेमेंट शुल्क लेते हैं; व्यक्तियों के फ्लोटिंग रेट होम लोन पर आमतौर पर नहीं।"))
+        st.caption(L(plan.note, "मान्यता: प्रीपेमेंट से अवधि घटती है और ईएमआई वही रहती है। प्रीपेमेंट शुल्क और देर से भुगतान का जुर्माना आपके इनपुट के आधार पर अनुमानित है; वास्तविक लेंडर शुल्क अलग हो सकते हैं।"))
 
     with st.expander(L("Month-by-month schedule", "महीने-दर-महीने शेड्यूल")):
         df = pd.DataFrame([r.model_dump() for r in lending.amortization_schedule(principal, rate, months)])
@@ -196,8 +215,8 @@ def tab_help():
 def render():
     page_header(L("Loans", "लोन"), L("Plan EMIs, see what you qualify for, and compare offers by their real cost.",
                                      "ईएमआई प्लान करें, पात्रता देखें और ऑफर की असली लागत से तुलना करें।"))
-    tabs = st.tabs([L("🧮 EMI & prepayment", "🧮 ईएमआई और प्रीपेमेंट"), L("✅ Eligibility", "✅ पात्रता"),
-                    L("⚖️ Compare offers", "⚖️ ऑफर तुलना"), L("📑 Documents & terms", "📑 दस्तावेज़ और शर्तें")])
-    for tab, fn in zip(tabs, (tab_emi, tab_eligibility, tab_compare, tab_help)):
+    tabs = st.tabs([L("✅ Eligibility", "✅ पात्रता"), L("⚖️ Compare offers", "⚖️ ऑफर तुलना"),
+                    L("🧮 EMI & prepayment", "🧮 ईएमआई और प्रीपेमेंट"), L("📑 Documents & terms", "📑 दस्तावेज़ और शर्तें")])
+    for tab, fn in zip(tabs, (tab_eligibility, tab_compare, tab_emi, tab_help)):
         with tab:
             fn()

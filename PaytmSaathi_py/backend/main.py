@@ -385,12 +385,18 @@ class PrepaymentRequest(EMIRequest):
     yearly_extra: float = 0.0
     lump_sum: float = 0.0
     lump_sum_month: int = 12
+    prepayment_penalty_pct: float = Field(0.0, ge=0.0, le=100.0)
+    late_payment_penalty_annual_pct: float = Field(0.0, ge=0.0, le=100.0)
+    late_payment_days: int = Field(0, ge=0, le=365)
+    late_payment_emi_count: int = Field(0, ge=0, le=12)
 
 
 @app.post("/lending/prepayment", response_model=lending.PrepaymentPlan, tags=["lending"])
 def prepayment(body: PrepaymentRequest):
     return lending.prepayment_plan(body.principal, body.annual_rate_pct, body.tenure_months,
-                                   body.extra_monthly, body.yearly_extra, body.lump_sum, body.lump_sum_month)
+                                   body.extra_monthly, body.yearly_extra, body.lump_sum, body.lump_sum_month,
+                                   body.prepayment_penalty_pct, body.late_payment_penalty_annual_pct,
+                                   body.late_payment_days, body.late_payment_emi_count)
 
 
 @app.post("/lending/eligibility/levers", response_model=list[lending.EligibilityLever], tags=["lending"])
