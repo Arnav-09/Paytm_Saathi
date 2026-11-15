@@ -210,7 +210,36 @@ def my_payment_tickets(user_id: str = "") -> dict:
     return {"tickets": out}
 
 
+@_safe
+def loan_preflight_check(monthly_income: float, loan_amount: float, tenure_months: int, annual_rate_pct: float,
+                         existing_emis: float = 0.0, card_dues_monthly: float = 0.0, monthly_expenses: Optional[float] = None,
+                         employment_type: str = "salaried", credit_score_range: str = "unknown",
+                         savings: Optional[float] = None, shock_amount: Optional[float] = None,
+                         recent_applications: int = 0, has_overdue: bool = False) -> dict:
+    """Loan Pre-Flight from numbers the user gave in chat: EMI, total interest, debt-to-income, monthly leftover,
+    Safe/Tight/High Risk stress test (rate rise, income drop, one-time emergency), risk factors, actions, documents.
+
+    Use ONLY the user's numbers. Never assume an interest rate: if the user did not give one, ask.
+    credit_score_range: 750+, 700-749, 650-699, <650 or unknown. shock_amount: one-time emergency (e.g. hospital bill).
+    """
+    from .session_tools import compact_preflight
+
+    inp = lending.LoanPreflightInput(monthly_income=monthly_income, loan_amount=loan_amount, tenure_months=tenure_months,
+                                     annual_rate_pct=annual_rate_pct, existing_emis=existing_emis,
+                                     card_dues_monthly=card_dues_monthly, monthly_expenses=monthly_expenses,
+                                     employment_type=employment_type, credit_score_range=credit_score_range,
+                                     savings=savings, recent_applications=recent_applications, has_overdue=has_overdue)
+    return compact_preflight(lending.loan_preflight(inp, shock_amount))
+
+
+@_safe
+def decode_rejection_text(text: str) -> dict:
+    """Explain a loan rejection reason the user typed or pasted (e.g. 'high FOIR', 'multiple enquiries') and what to do next."""
+    lines = [(f"your message line {i}", ln.strip()) for i, ln in enumerate((text or "").splitlines() or [text], 1) if ln.strip()]
+    return lending.decode_rejection(lines, "your message").model_dump()
+
+
 TOOLS = [calculate_emi, prepayment_savings, loan_eligibility, compare_loan_offers, scan_message_for_scam,
          check_link, validate_payment_id, grievance_contacts, search_knowledge, search_my_policy,
-         my_policy_overview, policy_waiting_periods, my_payment_tickets]
+         my_policy_overview, policy_waiting_periods, my_payment_tickets, loan_preflight_check, decode_rejection_text]
 TOOL_FUNCS = {fn.__name__: fn for fn in TOOLS}

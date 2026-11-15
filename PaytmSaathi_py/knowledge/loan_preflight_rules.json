@@ -1,0 +1,96 @@
+{
+  "_note": "Editable, ILLUSTRATIVE rules for Loan Pre-Flight. They are not any lender's policy. Saathi never invents eligibility rules, rates or approval decisions; everything comes from these values and the user's own inputs.",
+  "stress_levels": {
+    "safe": {"max_dti_pct": 40, "min_buffer_pct_of_income": 20},
+    "tight": {"max_dti_pct": 55, "min_buffer_pct_of_income": 5}
+  },
+  "stress_scenarios": {
+    "rate_increase_pct_points": 2,
+    "income_drop_pct": 20,
+    "default_shock_rupees": 100000
+  },
+  "credit_score_bands": [
+    {"band": "750+", "note": "Usually considered good by lenders."},
+    {"band": "700-749", "note": "Often acceptable; offers may be costlier."},
+    {"band": "650-699", "note": "Some lenders may decline or charge more."},
+    {"band": "<650", "note": "Many lenders decline unsecured loans in this range."},
+    {"band": "unknown", "note": "Not provided."}
+  ],
+  "risk_factors": {
+    "high_dti_pct": 50,
+    "high_card_utilization_pct": 30,
+    "many_recent_applications": 3
+  },
+  "rejection_reasons": [
+    {
+      "code": "low_credit_score",
+      "patterns": ["low credit score", "credit score", "cibil score", "bureau score", "score below", "insufficient score"],
+      "title": "Credit score below the lender's requirement",
+      "explanation": "The lender's minimum credit score was not met. Scores fall with late payments, high card usage, defaults and many recent loan enquiries.",
+      "actions": ["Pay every EMI and card bill on time for the next 6-12 months.", "Bring card usage below 30% of your limit.", "Check your credit report for errors and dispute them with the bureau."]
+    },
+    {
+      "code": "high_foir",
+      "patterns": ["foir", "debt to income", "dti", "high obligations", "existing obligations", "repayment capacity", "insufficient income", "income not sufficient"],
+      "title": "Too much of your income already goes to EMIs",
+      "explanation": "Lenders check what share of your income is already committed to EMIs and card dues. A new EMI would push it above their limit.",
+      "actions": ["Close or prepay a small existing loan first.", "Ask for a smaller amount or a longer tenure.", "Add a co-applicant with income."]
+    },
+    {
+      "code": "overdue_or_default",
+      "patterns": ["overdue", "dpd", "days past due", "default", "written off", "write-off", "settled", "settlement", "suit filed", "wilful"],
+      "title": "Overdue, settled or written-off accounts on your report",
+      "explanation": "Missed payments (DPD), settlements or write-offs signal repayment risk and are a common reason for rejection.",
+      "actions": ["Clear any overdue amount immediately.", "For settled accounts, ask the lender about paying the balance and getting a 'closed' status.", "Get a no-dues certificate and check your report is updated."]
+    },
+    {
+      "code": "too_many_enquiries",
+      "patterns": ["multiple enquiries", "too many enquiries", "credit hungry", "multiple applications", "recent enquiries", "hard inquiries", "hard enquiries"],
+      "title": "Too many recent loan or card applications",
+      "explanation": "Several applications in a short time make you look credit-hungry and each one can lower your score slightly.",
+      "actions": ["Avoid new applications for 3-6 months.", "Use soft-check eligibility tools instead of formal applications.", "Apply to one lender at a time."]
+    },
+    {
+      "code": "high_utilization",
+      "patterns": ["high utilization", "high utilisation", "credit utilization", "credit utilisation", "card usage"],
+      "title": "High credit card usage",
+      "explanation": "Using a large share of your card limit suggests financial stress.",
+      "actions": ["Pay down card balances below 30% of the limit.", "Pay before the statement date so a lower balance is reported."]
+    },
+    {
+      "code": "thin_file",
+      "patterns": ["no credit history", "thin file", "insufficient credit history", "new to credit", "ntc"],
+      "title": "Not enough credit history",
+      "explanation": "The lender could not assess you because your credit history is short or empty.",
+      "actions": ["Start with a small secured credit card or a credit-builder loan.", "Use it lightly and pay in full every month."]
+    },
+    {
+      "code": "income_or_employment",
+      "patterns": ["employment", "employer not", "unstable income", "income proof", "salary not", "job stability", "vintage", "business vintage", "itr"],
+      "title": "Income or employment could not be verified or is too new",
+      "explanation": "Lenders need stable, provable income and often a minimum time with your employer or in business.",
+      "actions": ["Submit complete income proof (salary slips, ITR, bank statements).", "Reapply after completing the lender's minimum job or business tenure."]
+    },
+    {
+      "code": "documents",
+      "patterns": ["document", "kyc", "mismatch", "incomplete application", "address proof", "pan mismatch", "name mismatch"],
+      "title": "Documents incomplete or details not matching",
+      "explanation": "Missing documents or mismatched details (name, date of birth, address) stop the application.",
+      "actions": ["Make sure your name and date of birth match across PAN, Aadhaar and bank records.", "Submit every document on the checklist."]
+    },
+    {
+      "code": "age_or_location",
+      "patterns": ["age criteria", "age limit", "serviceable", "pincode", "location not", "negative area", "negative profile"],
+      "title": "Age or location outside the lender's policy",
+      "explanation": "Lenders lend only within certain age ranges and serviceable areas.",
+      "actions": ["Ask which lenders serve your location and age group.", "Consider a co-applicant within the lender's criteria."]
+    }
+  ],
+  "explanations": {
+    "prepayment": "Prepayment means paying part of the loan early. It reduces the interest you pay and can shorten the tenure. RBI does not allow prepayment charges on floating-rate loans taken by individuals for non-business purposes; fixed-rate and business loans may have charges, so check your agreement.",
+    "foreclosure": "Foreclosure means closing the whole loan before its tenure ends. You pay the outstanding principal (plus any charges allowed by your agreement) and save the remaining interest. Ask for a no-dues certificate and check your credit report shows the loan as closed.",
+    "interest": "Your EMI is mostly interest in the early years and mostly principal later. A higher rate or a longer tenure increases the total interest you pay, even if the EMI looks smaller.",
+    "late_payment": "A late EMI usually brings a penalty charge and is reported to credit bureaus. Even one payment 30+ days late can lower your credit score and make future loans harder or costlier. Repeated non-payment can lead to recovery action."
+  },
+  "disclaimer": "This is not a loan approval, credit decision, or guarantee of eligibility. Rules and thresholds used here are illustrative; the lender decides."
+}

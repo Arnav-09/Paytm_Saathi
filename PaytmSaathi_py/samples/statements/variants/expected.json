@@ -1,0 +1,529 @@
+{
+  "reference": {
+    "bank": [
+      [
+        "2026-11-01",
+        18000.0,
+        "debit"
+      ],
+      [
+        "2026-11-03",
+        12500.0,
+        "debit"
+      ],
+      [
+        "2026-11-05",
+        85000.0,
+        "credit"
+      ],
+      [
+        "2026-11-06",
+        649.0,
+        "debit"
+      ],
+      [
+        "2026-11-08",
+        456.0,
+        "debit"
+      ],
+      [
+        "2026-11-09",
+        2675.5,
+        "debit"
+      ],
+      [
+        "2026-11-10",
+        1200.0,
+        "credit"
+      ],
+      [
+        "2026-11-11",
+        1840.0,
+        "debit"
+      ],
+      [
+        "2026-11-12",
+        5000.0,
+        "debit"
+      ],
+      [
+        "2026-11-13",
+        999.0,
+        "credit"
+      ],
+      [
+        "2026-11-14",
+        400.0,
+        "debit"
+      ],
+      [
+        "2026-11-14",
+        72.0,
+        "debit"
+      ]
+    ],
+    "card": [
+      [
+        "2026-10-18",
+        3999.0,
+        "debit"
+      ],
+      [
+        "2026-10-21",
+        389.0,
+        "debit"
+      ],
+      [
+        "2026-10-25",
+        3400.0,
+        "debit"
+      ],
+      [
+        "2026-10-29",
+        12999.0,
+        "debit"
+      ],
+      [
+        "2026-11-02",
+        720.0,
+        "debit"
+      ],
+      [
+        "2026-11-04",
+        1200.0,
+        "credit"
+      ],
+      [
+        "2026-11-06",
+        1000.0,
+        "debit"
+      ],
+      [
+        "2026-11-06",
+        180.0,
+        "debit"
+      ],
+      [
+        "2026-11-08",
+        5000.0,
+        "credit"
+      ],
+      [
+        "2026-11-12",
+        1250.0,
+        "debit"
+      ]
+    ]
+  },
+  "files": {
+    "hdfc_style.csv": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "opening_balance": 32345.6,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "sbi_style.xlsx": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "opening_balance": 32345.6,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "icici_style.csv": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "signed_amount.csv": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "card_export.csv": {
+      "kind": "card",
+      "count": 10,
+      "total_debit": 23937.0,
+      "total_credit": 6200.0,
+      "same_as": "card",
+      "checks": [
+        {
+          "contains": "CROMA",
+          "type": "debit",
+          "amount": 12999.0,
+          "date": "2026-10-29"
+        },
+        {
+          "contains": "BBPS PAYMENT",
+          "type": "credit",
+          "amount": 5000.0
+        },
+        {
+          "contains": "REFUND AMAZON",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "LATE PAYMENT FEE",
+          "type": "debit",
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "drcr_column.tsv": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "bank_table.pdf": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "opening_balance": 32345.6,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        },
+        {
+          "contains": "ACME TECHNOLOGIES PVT LTD",
+          "type": "credit",
+          "amount": 85000.0
+        },
+        {
+          "contains": "MG ROAD",
+          "source_has": "page 2"
+        }
+      ]
+    },
+    "card_layout2.pdf": {
+      "kind": "card",
+      "count": 10,
+      "total_debit": 23937.0,
+      "total_credit": 6200.0,
+      "same_as": "card",
+      "checks": [
+        {
+          "contains": "CROMA",
+          "type": "debit",
+          "amount": 12999.0,
+          "date": "2026-10-29"
+        },
+        {
+          "contains": "BBPS PAYMENT",
+          "type": "credit",
+          "amount": 5000.0
+        },
+        {
+          "contains": "REFUND AMAZON",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "LATE PAYMENT FEE",
+          "type": "debit",
+          "category": "Fees & charges"
+        }
+      ],
+      "card_total_due": 38450.0,
+      "card_minimum_due": 1930.0,
+      "card_due_date": "2026-12-05",
+      "card_credit_limit": 100000.0,
+      "period_start": "2026-10-16",
+      "period_end": "2026-11-15"
+    },
+    "excel_dates.xlsx": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "messy.csv": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    },
+    "no_header.csv": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ],
+      "warning": true
+    },
+    "html_export.xls": {
+      "kind": "bank",
+      "count": 12,
+      "total_debit": 41592.5,
+      "total_credit": 87199.0,
+      "same_as": "bank",
+      "closing_balance": 77952.1,
+      "checks": [
+        {
+          "contains": "SALARY ACME",
+          "type": "credit",
+          "amount": 85000.0,
+          "date": "2026-11-05"
+        },
+        {
+          "contains": "PRIYA SHARMA",
+          "type": "credit",
+          "amount": 1200.0
+        },
+        {
+          "contains": "BIGBASKET",
+          "type": "debit",
+          "amount": 2675.5,
+          "date": "2026-11-09"
+        },
+        {
+          "contains": "GST ON MIN BAL",
+          "type": "debit",
+          "amount": 72.0,
+          "category": "Fees & charges"
+        }
+      ]
+    }
+  }
+}

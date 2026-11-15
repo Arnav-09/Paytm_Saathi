@@ -455,3 +455,89 @@ token signed with `APP_SECRET`.
 ### OCR
 
 `pip install rapidocr-onnxruntime` enables OCR for scanned policy PDFs and bill photos (English and digits). Hindi OCR needs Tesseract with the `hin` pack and `OCR_LANGS=eng+hin`.
+
+---
+
+## Money Clarity and Loan Pre-Flight (inside Saathi Chat)
+
+Both features live **inside the Saathi Chat page** - no separate screens. Above the chat box there are two boxes:
+
+* **📎 Add statement or document** - bank or credit-card statements (CSV, Excel `.xlsx`, PDF; several months at once)
+  and loan documents (rejection letter, credit report: PDF, image or text). Optional: current balance and next salary date.
+* **🏦 Loan details** - amount, tenure, quoted rate, income, existing EMIs, card dues, expenses, savings, credit-score
+  range, employment, recent applications. "Save & check" stores the simulation (inputs + results) for the session.
+
+Results appear as **cards inside the chat replies**: the Money Clarity report (alerts, upcoming dues, recurring charges,
+spending chart, action plan, clickable transactions -> "Explain this transaction"), the Loan Pre-Flight card (EMI, total
+interest, monthly leftover, before/after cash-flow chart, Safe / Tight / High Risk stress test, risks, documents,
+explanations) and the rejection decoder (each reason with the exact quoted line).
+
+### How it is built
+
+| Layer | What | Where |
+|---|---|---|
+| Ingestion | CSV/TSV/Excel/HTML-xls/PDF (+OCR), layout-tolerant -> masked, normalised transactions with `source` (row / page+line) | `ai_engine/statements.py` |
+| Analysis (deterministic) | categories, month-over-month (bill-to-bill for cards), recurring, duplicates, overlapping subscriptions, price rises, fees, unusual payments, upcoming dues, cash-flow projection, action plan, evidence + confidence | `ai_engine/money.py` |
+| Loan maths (deterministic) | EMI = P x r x (1+r)^n / ((1+r)^n - 1), DTI, before/after cash flow, Safe/Tight/High Risk, rate/income/emergency stress tests, what-if, risk factors, rejection decoder | `ai_engine/lending.py` |
+| Rules (editable) | categories, fee keywords, subscription groups, recurring tolerances; stress thresholds, rejection reasons, explanations | `knowledge/money_rules.json`, `knowledge/loan_preflight_rules.json` |
+| Chat tools | session tools run in-process on the user's session data (`money_report`, `explain_transaction`, `list_transactions`, `my_loan_preflight`, `my_loan_what_if`, `decode_my_documents`); stateless tools over MCP (`loan_preflight_check`, `decode_rejection_text`) | `ai_engine/session_tools.py`, `ai_engine/assistant_tools.py` |
+| Grounding | when a statement/loan/document is in the session and the question needs it, the app runs the tool itself before asking the model; the LLM only explains the numbers. Answers cite `[S#]` (statement rows) / `[D#]` (document lines); uncited answers are labelled general guidance | `ai_engine/assistant.py` |
+| API | `POST /money/analyse`, `/money/explain-transaction`, `/loans/preflight`, `/loans/what-if`, `/loans/decode-rejection` (login required, nothing stored) | `backend/main.py` |
+
+Privacy: statements and simulations stay in the user's session only (lost on logout/restart, never written to disk);
+card/account numbers, Aadhaar, PAN and OTPs are masked when the file is read. Every money answer carries
+"informational only, not financial advice"; every loan answer carries "This is not a loan approval, credit decision,
+or guarantee of eligibility." Loan thresholds are **illustrative** - edit `knowledge/loan_preflight_rules.json`.
+
+Sample data: `python samples/make_statement_samples.py` writes fictional files to `samples/statements/`.
+
+**Different bank layouts.** The parser finds the transaction table anywhere near the top of the file and matches
+columns by meaning, not position. That covers header names ("Txn Date" / "Value Dt" / "Narration" /
+"Withdrawal Amt. (INR)" / "Dr/Cr"), extra columns, any delimiter, every workbook sheet, text or real Excel dates,
+Rs/INR/₹ amounts with Cr/Dr markers, brackets or minus signs, card exports where payments are negative, wrapped
+descriptions, repeated headers and summary blocks. Files with no header row get their columns guessed from the values
+(with a warning). PDF tables are rebuilt from word positions. `python samples/make_statement_variants.py` writes 12
+layouts of the same transactions to `samples/statements/variants/`, with `expected.json`:
+
+| File | What is different |
+|---|---|
+| `hdfc_style.csv` | account details on top, `dd/mm/yy`, Withdrawal/Deposit columns, summary block (labels row + values row) at the end |
+| `sbi_style.xlsx` | Summary sheet + Statement sheet, table starts at row 18, "1 Nov 2026" text dates, comma amounts, Total row |
+| `icici_style.csv` | semicolon-separated, "(INR )" headers, serial-number column, header repeated mid-file, legend lines |
+| `signed_amount.csv` | "Date & Time", signed `-₹18,000.00` / `+₹85,000.00` amounts, extra ID / Category / Mode columns |
+| `card_export.csv` | card export: purchases positive, payments and refunds negative |
+| `drcr_column.tsv` | tab-separated, Amount + Dr/Cr column, "Nov 01, 2026" dates, balance with " Cr" |
+| `bank_table.pdf` | drawn table, right-aligned amounts, descriptions wrapped onto two lines, 2 pages with repeated header |
+| `card_layout2.pdf` | card summary as a labels row with values below, "18 Oct 26" dates, "CR" markers, "Total Outstanding" |
+| `excel_dates.xlsx` | real Excel dates and numbers, Description + Remarks, blank row, Total row |
+| `messy.csv` | BOM + CRLF, blank lines, quoted commas, a line break inside a narration, `01.11.2026`, trailing-minus debits |
+| `no_header.csv` | no header row at all |
+| `html_export.xls` | ".xls" that is really an HTML table (what many banks' "Download Excel" gives) |
+
+Not supported: the old binary Excel 97-2003 `.xls` format (you get a message asking you to save it as .xlsx or CSV).
+Password-protected PDFs aren't supported either. Scanned PDFs need OCR installed.
+
+### Demo script (3 journeys)
+
+Start the app (`streamlit run app.py`), log in, open **Saathi Chat**.
+
+1. **"I am planning my mother's hospitalisation; will this be cashless?"**
+   Upload `samples/demo_health_policy.pdf` in Insurance -> My policy, then in Saathi Chat pick it under
+   "Use my policy in this chat" and ask: *"I am planning my mother's cataract surgery in a network hospital. Will this be
+   cashless, and what will the policy cover?"* -> cashless steps [K#] plus the ₹40,000/eye cataract sub-limit, room-rent
+   cap and ICU limit cited to the policy [P#]. For a payout estimate use Insurance -> Claim Pre-Flight.
+2. **"Why did my credit-card bill increase and what bills are due soon?"**
+   📎 add `credit_card_oct_2026.pdf` and `credit_card_nov_2026.pdf` -> the Money Clarity card appears. Ask the question ->
+   bill-to-bill change (Croma ₹12,999 purchase, late fee + finance charges + GST), card due ₹38,450 on 05 Dec,
+   utilisation 38.5%, with evidence rows. Click a transaction -> "Explain this transaction". Also try
+   `bank_statement_oct_nov_2026.csv` -> *"Will I face a cash crunch before my next salary?"* (Tight: rent + EMI due before
+   the 7 Dec salary), duplicate Swiggy charge, Netflix price rise, two music subscriptions.
+3. **"Can I afford a ₹5 lakh personal loan right now?"**
+   🏦 Loan details: ₹5,00,000, 36 months, 13.5%, income ₹85,000, EMIs ₹12,500, card ₹5,000, expenses ₹40,000,
+   savings ₹30,000 -> card: EMI ₹16,968, 41% of income to EMIs, **Tight**. Then ask *"What happens if I choose a 5-year
+   tenure?"*, *"Can I afford this loan if my father is hospitalised next month?"*, and (after 📎 adding
+   `loan_rejection_letter.pdf`) *"Why might my loan application be rejected?"* -> FOIR, enquiries and credit score, each
+   with the quoted line [D#].
+
+Tests: `pytest tests/test_money.py tests/test_loan_preflight.py tests/test_assistant.py` (offline).
+Feature 1 (Claim Readiness Score) is pending its specification.

@@ -19,6 +19,28 @@ from dotenv import load_dotenv
 # Load environment variables from a .env file if one exists (never hardcode keys).
 load_dotenv()
 
+
+def _use_system_trust_store() -> None:
+    """Make HTTPS use the operating system's trusted certificates.
+
+    Fixes ``CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`` on machines where Python's
+    own certificate list is missing or incomplete: Macs with python.org Python, and networks or antivirus
+    products that re-sign HTTPS traffic with a certificate the OS already trusts. Certificate checking stays ON;
+    it only changes which trusted list is used. Needs Python 3.10+ and the ``truststore`` package (skipped
+    silently otherwise). Set SAATHI_NO_TRUSTSTORE=1 to turn it off.
+    """
+    if os.getenv("SAATHI_NO_TRUSTSTORE") == "1":
+        return
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception:  # not installed, or Python < 3.10: fall back to Python's default certificates
+        pass
+
+
+_use_system_trust_store()
+
 logger = logging.getLogger("paytm_saathi")
 if not logger.handlers:
     _handler = logging.StreamHandler()
@@ -96,3 +118,18 @@ def mask_secret(value: Optional[str]) -> str:
     if len(value) <= 7:
         return "***"
     return value[:3] + "***" + value[-4:]
+
+
+def inr(value: float, decimals: int = 0) -> str:
+    """Indian rupee format: 486000 -> '₹4,86,000'; 1234.5 with decimals=2 -> '₹1,234.50'."""
+    negative = value < 0
+    whole, _, frac = f"{abs(value):.{decimals}f}".partition(".")
+    head, tail = whole[:-3], whole[-3:]
+    groups = []
+    while len(head) > 2:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        groups.insert(0, head)
+    text = ",".join(groups + [tail]) if groups else tail
+    return f"{'-' if negative else ''}₹{text}" + (f".{frac}" if decimals else "")

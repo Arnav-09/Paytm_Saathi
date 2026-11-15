@@ -67,7 +67,7 @@ _STATUS = {
     "password_mismatch": 422, "terms_not_accepted": 422, "missing_credentials": 400,
     "mobile_taken": 409, "email_taken": 409, "invalid_credentials": 401, "invalid_token": 401,
     "account_locked": 429, "server_misconfigured": 500, "account_storage_error": 500,
-    "attachment_not_found": 404, "evidence_rejected": 422,
+    "attachment_not_found": 404, "evidence_rejected": 422, "statement_error": 422,
 }
 
 
@@ -503,3 +503,88 @@ def languages():
     from ai_engine.language import SUPPORTED_LANGUAGES
 
     return SUPPORTED_LANGUAGES
+
+
+# ---------------------------------------------------------------------------
+# Money Clarity (login required; statements are analysed and returned, never stored)
+# ---------------------------------------------------------------------------
+from datetime import date as _date  # noqa: E402
+
+from fastapi import Form  # noqa: E402
+
+from ai_engine import money as _money, statements as _statements  # noqa: E402
+
+
+class MoneyAnalysis(BaseModel):
+    statement: _statements.Statement
+    report: _money.MoneyReport
+
+
+@app.post("/money/analyse", response_model=MoneyAnalysis, tags=["money"])
+async def money_analyse(files: list[UploadFile] = File(..., description="CSV, Excel (.xlsx) or PDF statements"),
+                        current_balance: Optional[float] = Form(None), next_salary_date: Optional[str] = Form(None),
+                        user_id: str = Depends(current_user_id)):
+    """Parse one or more statements (masked) and return the Money Clarity report with evidence for every insight."""
+    parsed = []
+    for f in files[:6]:
+        data = await f.read(_statements.MAX_STATEMENT_BYTES + 1)
+        parsed.append(await run_in_threadpool(_statements.parse_statement, f.filename or "statement", data))
+    stmt = _statements.merge_statements(parsed)
+    salary = _date.fromisoformat(next_salary_date) if next_salary_date else None
+    return MoneyAnalysis(statement=stmt, report=_money.analyse(stmt, _date.today(), current_balance, salary))
+
+
+class ExplainTxnRequest(BaseModel):
+    statement: _statements.Statement
+    txn_id: str
+
+
+@app.post("/money/explain-transaction", tags=["money"])
+def money_explain(body: ExplainTxnRequest, user_id: str = Depends(current_user_id)):
+    """Facts about one transaction (pattern, duplicate, fee meaning) from a statement returned by /money/analyse."""
+    return _money.explain_transaction(body.statement, body.txn_id)
+
+
+# ---------------------------------------------------------------------------
+# Loan Pre-Flight (deterministic; illustrative rules from knowledge/loan_preflight_rules.json)
+# ---------------------------------------------------------------------------
+class PreflightRequest(lending.LoanPreflightInput):
+    shock_amount: Optional[float] = Field(None, description="one-time emergency expense for the stress test")
+
+
+@app.post("/loans/preflight", response_model=lending.LoanPreflightResult, tags=["lending"])
+def loans_preflight(body: PreflightRequest, user_id: str = Depends(current_user_id)):
+    """EMI, total interest, debt-to-income, monthly cash flow before/after, Safe/Tight/High Risk stress test,
+    risk factors and actions. Not a loan approval, credit decision or guarantee of eligibility."""
+    return lending.loan_preflight(lending.LoanPreflightInput(**body.model_dump(exclude={"shock_amount"})), body.shock_amount)
+
+
+class WhatIfRequest(BaseModel):
+    plan: lending.LoanPreflightInput
+    tenure_months: Optional[int] = None
+    loan_amount: Optional[float] = None
+    annual_rate_pct: Optional[float] = None
+    shock_amount: Optional[float] = None
+    income_drop_pct: Optional[float] = None
+
+
+@app.post("/loans/what-if", tags=["lending"])
+def loans_what_if(body: WhatIfRequest, user_id: str = Depends(current_user_id)):
+    return lending.loan_what_if(body.plan, body.tenure_months, body.loan_amount, body.annual_rate_pct,
+                                body.shock_amount, body.income_drop_pct)
+
+
+@app.post("/loans/decode-rejection", response_model=lending.RejectionDecode, tags=["lending"])
+async def loans_decode_rejection(file: Optional[UploadFile] = File(None), text: Optional[str] = Form(None),
+                                 user_id: str = Depends(current_user_id)):
+    """Explain a rejection letter / credit report (upload) or pasted reason text, quoting the exact lines."""
+    if file is not None:
+        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "File is too large (limit 15 MB).")
+        lines = await run_in_threadpool(lending.document_lines, file.filename or "document", data)
+        return lending.decode_rejection(lines, file.filename or "document")
+    if text and text.strip():
+        return lending.decode_rejection([(f"your text line {i}", ln.strip()) for i, ln in enumerate(text.splitlines(), 1) if ln.strip()],
+                                        "your text")
+    raise HTTPException(400, "Upload a document or paste the rejection text.")

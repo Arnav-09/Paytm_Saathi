@@ -1,0 +1,41 @@
+{
+  "_note": "Editable rules for Money Clarity. Keywords are matched case-insensitively as whole words/phrases against the transaction description (so 'emi' does not match 'premium'). Order of categories matters: the first match wins.",
+  "categories": [
+    ["Fees & charges", ["late fee", "late payment", "finance charge", "interest charged", "overlimit", "over limit", "annual fee", "joining fee", "markup", "forex", "cross currency", "gst on", "igst", "cgst", "sgst", "penalty", "bounce", "cheque return", "ecs return", "nach return", "min bal", "minimum balance", "sms charges", "service charge", "processing fee", "fuel surcharge"]],
+    ["Income", ["salary", "sal cr", "payroll", "stipend", "pension"]],
+    ["Refunds & cashback", ["refund", "reversal", "cashback", "chargeback"]],
+    ["Subscriptions", ["netflix", "spotify", "hotstar", "jiohotstar", "prime video", "amazon prime", "youtube premium", "sonyliv", "zee5", "jiocinema", "apple.com", "apple music", "google one", "icloud", "gaana", "wynk", "audible", "linkedin premium", "chatgpt", "openai", "microsoft 365", "adobe"]],
+    ["Insurance", ["insurance", "premium", "lic", "lic of india", "hdfc ergo", "star health", "icici lombard", "niva bupa", "care health", "policybazaar"]],
+    ["EMI & loans", ["emi", "loan", "nach", "ecs", "ach d", "bajaj finserv", "home credit", "credit card payment", "cc payment", "card payment"]],
+    ["Rent & housing", ["rent", "nobroker", "maintenance", "society"]],
+    ["Bills & utilities", ["electricity", "bescom", "tata power", "adani electricity", "msedcl", "water bill", "gas bill", "indane", "bharat gas", "broadband", "airtel", "jio", "vodafone", "vi", "recharge", "dth", "tata play", "postpaid"]],
+    ["Food & dining", ["swiggy", "zomato", "restaurant", "cafe", "dominos", "pizza", "mcdonald", "kfc", "starbucks", "eatsure"]],
+    ["Groceries", ["bigbasket", "blinkit", "zepto", "dmart", "grocery", "supermarket", "more retail", "jiomart", "instamart"]],
+    ["Shopping", ["amazon", "flipkart", "myntra", "ajio", "meesho", "nykaa", "croma", "reliance digital", "decathlon"]],
+    ["Travel & fuel", ["uber", "ola", "rapido", "irctc", "makemytrip", "goibibo", "indigo", "air india", "redbus", "petrol", "fuel", "hpcl", "iocl", "bpcl", "fastag", "metro"]],
+    ["Health", ["pharmacy", "apollo", "hospital", "clinic", "1mg", "pharmeasy", "netmeds", "diagnostic", "lab"]],
+    ["Education", ["school", "college", "tuition", "fees", "byju", "unacademy", "coursera", "udemy"]],
+    ["Investments", ["sip", "mutual fund", "zerodha", "groww", "upstox", "ppf", "nps", "fd booking", "recurring deposit"]],
+    ["Cash withdrawal", ["atm", "cash withdrawal", "cash wdl", "nwd"]],
+    ["Transfers", ["upi", "neft", "imps", "rtgs", "transfer", "trf"]]
+  ],
+  "credit_keywords": ["salary", "refund", "reversal", "cashback", "credited", "deposit", "received", "interest credit", "int.pd", "by transfer", "neft cr", "imps cr", "upi cr"],
+  "subscription_groups": {
+    "Video streaming": ["netflix", "hotstar", "jiohotstar", "prime video", "sonyliv", "zee5", "jiocinema"],
+    "Music streaming": ["spotify", "apple music", "youtube premium", "gaana", "wynk"],
+    "Cloud storage": ["google one", "icloud", "dropbox"]
+  },
+  "recurring": {
+    "amount_tolerance_pct": 10,
+    "amount_tolerance_abs": 50,
+    "monthly_days": [25, 35],
+    "weekly_days": [6, 8],
+    "yearly_days": [350, 380]
+  },
+  "duplicate_window_days": 3,
+  "cash_flow": {
+    "tight_buffer_pct_of_income": 10,
+    "tight_buffer_min_rupees": 5000
+  },
+  "disclaimer": "These insights are informational only and are not financial advice. They are calculated from the statement you uploaded and may miss transactions it does not show."
+}
