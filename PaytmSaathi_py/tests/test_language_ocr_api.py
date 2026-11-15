@@ -196,3 +196,16 @@ def test_ui_catalog_lookup_without_live_translation(tmp_path, monkeypatch):
     assert i18n.tr("Log in", "ta", live=False) == "உள்நுழை"
     assert i18n.tr("Not translated yet", "ta", live=False) == "Not translated yet"
     assert i18n.tr("Log in", "en") == "Log in" and i18n.tr("Log in", "hi") == "Log in"
+
+
+def test_system_trust_store_keeps_certificate_checking_on(monkeypatch):
+    import ssl
+
+    from ai_engine import utils
+
+    utils._use_system_trust_store()  # must never weaken verification
+    ctx = ssl.create_default_context()
+    assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
+    monkeypatch.setenv("SAATHI_NO_TRUSTSTORE", "1")
+    utils._use_system_trust_store()  # opt-out is a harmless no-op
+    assert ssl.create_default_context().verify_mode == ssl.CERT_REQUIRED

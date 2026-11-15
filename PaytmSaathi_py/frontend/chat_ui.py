@@ -7,6 +7,8 @@ import threading
 import streamlit as st
 
 from ai_engine.assistant import Assistant, ChatContext, ChatResult, TOOL_LABELS
+from ai_engine.session_tools import build_session_tools
+from frontend.chat_cards import loan_box, render_cards, session_data, session_note, snapshot, upload_box
 from frontend.common import (
     L, current_policy, current_user, demo_mode, lang, my_policies, pick, policy_label, run, uid,
 )
@@ -90,11 +92,24 @@ def _notes_text(turn: dict) -> list[str]:
     return out
 
 
-def _render_turn(turn: dict) -> None:
+def _ask(question: str) -> None:
+    """Queue a follow-up question (from a card button) and rerun so it is sent like a typed message."""
+    st.session_state["chat_pending"] = question
+    st.rerun()
+
+
+def _add_turn(text: str, cards: list[str]) -> None:
+    """Assistant message produced by the app itself (e.g. after an upload), with its result cards."""
+    history = st.session_state.setdefault("gchat", {}).setdefault(uid(), [])
+    history.append({"role": "assistant", "content": text, "card_data": snapshot(cards), "tools": [], "sources": [], "notes": []})
+
+
+def _render_turn(turn: dict, idx: int = 0) -> None:
     with st.chat_message(turn["role"], avatar="🧑" if turn["role"] == "user" else "🛡️"):
         st.markdown(turn["content"])
         if turn["role"] != "assistant":
             return
+        render_cards(turn, f"t{idx}", _ask)
         tools = turn.get("tools", [])
         if tools:
             chips = " ".join(f'<span class="ps-chip">{"✅" if t["ok"] else "⚠️"} {esc(L(TOOL_LABELS.get(t["name"], t["name"]), TOOL_LABELS.get(t["name"], t["name"])))}</span>' for t in tools)
@@ -103,7 +118,7 @@ def _render_turn(turn: dict) -> None:
             with st.expander(L(f"Sources ({len(turn['sources'])})", f"स्रोत ({len(turn['sources'])})")):
                 for s in turn["sources"]:
                     where = s["title"] + (f" · {s['detail']}" if s.get("detail") else "")
-                    icon = "📄" if s["kind"] == "policy" else "📘"
+                    icon = {"policy": "📄", "statement": "🧾", "document": "📑"}.get(s["kind"], "📘")
                     st.markdown(f'<div class="ps-note"><b>{icon} [{esc(s["ref"])}] {esc(where)}</b><br>{esc(s["text"])}</div>', unsafe_allow_html=True)
         for line in _notes_text(turn):
             st.caption(line)
@@ -117,6 +132,9 @@ def _suggestions() -> list[tuple[str, str]]:
         ("Is this safe? 'Your KYC expires today, update at paytm-kyc.xyz'", "क्या यह सुरक्षित है? 'आपका केवाईसी आज खत्म, paytm-kyc.xyz पर अपडेट करें'"),
         ("Money was debited but my UPI payment failed. What now?", "पैसे कट गए पर यूपीआई पेमेंट फेल हो गया। अब क्या करूँ?"),
         ("Help me write a polite leave application", "छुट्टी के लिए एक विनम्र आवेदन लिखने में मदद कीजिए"),
+        ("Why did my credit-card bill increase and what bills are due soon?", "मेरा क्रेडिट-कार्ड बिल क्यों बढ़ा और कौन से बिल जल्द देने हैं?"),
+        ("Will I face a cash crunch before my next salary?", "क्या अगली सैलरी से पहले पैसों की तंगी होगी?"),
+        ("Can I afford a ₹5 lakh personal loan right now?", "क्या मैं अभी ₹5 लाख का पर्सनल लोन ले सकता हूँ?"),
     ]
     return base
 
@@ -153,6 +171,11 @@ def render() -> None:
         unsafe_allow_html=True)
     if demo_mode():
         st.warning(L("Demo mode: add a free Groq key in .env to chat for real.", "डेमो मोड: असली चैट के लिए .env में मुफ़्त Groq कुंजी जोड़ें।"))
+    u1, u2 = st.columns(2)
+    with u1:
+        upload_box(_add_turn)
+    with u2:
+        loan_box(_add_turn)
 
     history: list[dict] = st.session_state.setdefault("gchat", {}).setdefault(uid(), [])
     clicked = None
@@ -163,18 +186,20 @@ def render() -> None:
         for i, (en, hi) in enumerate(_suggestions()):
             if cols[i % 3].button(L(en, hi), key=f"gsg_{i}", width="stretch"):
                 clicked = L(en, hi)
-    for turn in history:
-        _render_turn(turn)
+    for idx, turn in enumerate(history):
+        _render_turn(turn, idx)
 
-    question = st.chat_input(L("Ask Saathi anything…", "साथी से कुछ भी पूछिए…")) or clicked
+    question = (st.chat_input(L("Ask Saathi anything…", "साथी से कुछ भी पूछिए…")) or clicked
+                or st.session_state.pop("chat_pending", None))
     if question:
         user = current_user()
         ctx = ChatContext(user_id=uid(), user_name=user.first_name if user else "", language=lang(),
-                          policy_id=chosen, policy_label=policy_label(chosen) if chosen else "")
+                          policy_id=chosen, policy_label=policy_label(chosen) if chosen else "", session_note=session_note())
+        local_tools = build_session_tools(session_data())
         model_history = [{"role": t["role"], "content": t["content"]} for t in history]
         with st.spinner(L("Saathi is thinking… (the first message can take a little longer)",
                           "साथी सोच रहा है… (पहले संदेश में थोड़ा समय लग सकता है)")):
-            result: ChatResult | None = run(assistant().chat, question, model_history, ctx)
+            result: ChatResult | None = run(assistant().chat, question, model_history, ctx, local_tools)
         if result:
             history.append({"role": "user", "content": result.user_text or question})
             history.append({
@@ -182,6 +207,7 @@ def render() -> None:
                 "sources": [s.model_dump() for s in result.sources],
                 "tools": [{"name": t.name, "ok": t.ok} for t in result.tools_used],
                 "notes": [n.model_dump() for n in result.guard_notes], "degraded": result.degraded,
+                "card_data": snapshot(result.cards, result.artifacts) if result.cards else {},
             })
         st.rerun()
 
