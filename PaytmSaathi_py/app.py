@@ -37,7 +37,6 @@ pages = [
     st.Page(fintech_ui.render, title=L("Payments & KYC", "पेमेंट और केवाईसी"), icon="📲", url_path="payments"),
 ]
 nav = st.navigation(pages, position="top")
-st.session_state["_pages"] = {p.url_path: p for p in pages}
 brand_bar()
 sidebar()
 nav.run()

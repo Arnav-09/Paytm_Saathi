@@ -1,0 +1,101 @@
+================================================================================
+DEMO HEALTH SHIELD - Individual Health Insurance Policy
+(SAMPLE DOCUMENT FOR TESTING - NOT A REAL INSURER OR POLICY)
+================================================================================
+
+Policy Name: Demo Shield Gold Plan
+Insurer Name: Demo Health Shield Insurance Co. Ltd. (fictional)
+Policy Type: Indemnity
+Policy Number: DHS-2025-004711
+Policy Period: 1 Jan 2025 to 31 Dec 2025
+Policy Start Date: 01/01/2025
+
+--------------------------------------------------------------------------------
+1. Definitions
+--------------------------------------------------------------------------------
+
+1.1 Hospitalisation means admission in a hospital for at least 24 consecutive hours.
+1.2 Pre-existing disease means any condition diagnosed before the policy start date.
+1.3 Network hospital means a hospital listed on our cashless network.
+1.4 Day care procedure means a treatment that does not need 24 hours of admission.
+
+--------------------------------------------------------------------------------
+2. Sum Insured
+--------------------------------------------------------------------------------
+
+2.1 The Sum Insured under this policy is Rs. 5,00,000 (Rupees Five Lakh) per policy year.
+2.2 Restoration: once exhausted, the Sum Insured is restored once in a policy year.
+
+--------------------------------------------------------------------------------
+3. Room Rent, Boarding and Nursing
+--------------------------------------------------------------------------------
+
+3.1 Room rent is limited to Rs. 5,000 per day for a single private room.
+3.2 ICU charges are limited to Rs. 10,000 per day.
+3.3 If you choose a room costlier than the limit, all doctor fees, surgery charges and nursing charges are reduced in the same proportion.
+3.4 Medicines, diagnostics and consumables are not affected by the room limit.
+
+--------------------------------------------------------------------------------
+4. Co-payment
+--------------------------------------------------------------------------------
+
+4.1 The policyholder shall bear a co-payment of 10% of every admissible claim.
+4.2 Co-payment is applied after the deductible.
+
+--------------------------------------------------------------------------------
+5. Deductible
+--------------------------------------------------------------------------------
+
+5.1 A deductible of Rs. 10,000 applies to each claim before co-payment.
+
+--------------------------------------------------------------------------------
+6. Waiting Periods
+--------------------------------------------------------------------------------
+
+6.1 Initial waiting period: 30 days from the policy start date, except for accidents.
+6.2 Pre-existing diseases: covered only after 36 months of continuous coverage.
+6.3 Specified diseases (cataract, hernia, knee replacement): 24 months.
+6.4 Maternity: 9 months of continuous coverage.
+
+--------------------------------------------------------------------------------
+7. Exclusions
+--------------------------------------------------------------------------------
+
+7.1 Cosmetic or aesthetic surgery, except reconstructive surgery after an accident.
+7.2 Dental treatment, unless caused by accident.
+7.3 Weight loss programmes, bariatric surgery and obesity treatment.
+7.4 Injuries from hazardous sports such as mountaineering or motor racing.
+7.5 Infertility and sex-change treatment.
+
+--------------------------------------------------------------------------------
+8. Sub-limits
+--------------------------------------------------------------------------------
+
+8.1 Cataract surgery is limited to Rs. 40,000 per eye per policy year.
+8.2 Maternity expenses are limited to Rs. 50,000 per policy year.
+8.3 Diagnostic tests done outside the hospital are limited to Rs. 5,000 per year.
+
+--------------------------------------------------------------------------------
+9. Pre and Post Hospitalisation
+--------------------------------------------------------------------------------
+
+9.1 Medical expenses incurred up to 30 days before admission are covered.
+9.2 Medical expenses incurred up to 60 days after discharge are covered.
+
+--------------------------------------------------------------------------------
+10. Claim Conditions
+--------------------------------------------------------------------------------
+
+10.1 Cashless: inform us 48 hours before a planned admission, or within 24 hours of an emergency admission, and submit the pre-authorisation form.
+10.2 Reimbursement: submit the claim form, original bills and discharge summary within 30 days of discharge.
+10.3 Claims for accidents must include an FIR or Medico-Legal Certificate.
+
+--------------------------------------------------------------------------------
+11. Grievance
+--------------------------------------------------------------------------------
+
+11.1 For complaints, write to the Grievance Officer at grievance@demo-shield.example and escalate to the Insurance Ombudsman if unresolved in 30 days.
+
+================================================================================
+END OF POLICY DOCUMENT
+================================================================================

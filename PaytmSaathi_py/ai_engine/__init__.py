@@ -17,6 +17,20 @@ from __future__ import annotations
 from typing import Optional
 
 from .bill_extractor import extract_bill, extract_bill_from_text, parse_bill_text
+from .claim_readiness import (
+    CashlessEligibility,
+    ClaimReadinessReport,
+    FinancialEstimate,
+    PolicyCard,
+    PolicyCitation,
+    PreAuthRequirement,
+    ReadinessScore,
+    RoomRentImpact,
+    generate_claim_readiness_report,
+    list_claim_readiness_reports,
+    load_claim_readiness_report,
+    save_claim_readiness_report,
+)
 from .document_processor import extract_pdf_pages
 from .language import (
     detect_language,
@@ -140,6 +154,19 @@ __all__ = [
     "InvalidQuestionError",
     "INSUFFICIENT_EVIDENCE_ANSWER",
     "MANDATORY_RAG_INSTRUCTIONS",
+    # Claim Pre-Flight
+    "ClaimReadinessReport",
+    "PolicyCard",
+    "ReadinessScore",
+    "CashlessEligibility",
+    "PreAuthRequirement",
+    "RoomRentImpact",
+    "FinancialEstimate",
+    "PolicyCitation",
+    "generate_claim_readiness_report",
+    "save_claim_readiness_report",
+    "load_claim_readiness_report",
+    "list_claim_readiness_reports",
 ]
 
 # Module-level singletons reused across calls.

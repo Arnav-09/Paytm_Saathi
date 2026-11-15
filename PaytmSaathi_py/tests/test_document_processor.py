@@ -6,7 +6,7 @@ any sample files shipped with the repo.
 
 from __future__ import annotations
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 import pytest
 
 from ai_engine.document_processor import extract_pdf_pages, validate_pdf_file

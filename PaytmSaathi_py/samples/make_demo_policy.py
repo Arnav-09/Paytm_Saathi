@@ -1,7 +1,7 @@
 """Generates samples/demo_health_policy.pdf - a FICTIONAL policy for testing only."""
 import pathlib
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 
 PAGES = [
     [

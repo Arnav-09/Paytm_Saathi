@@ -12,12 +12,21 @@ import streamlit as st
 
 from ai_engine import (
     ClaimContext,
+    CashlessEligibility,
+    ClaimReadinessReport,
+    FinancialEstimate,
     HospitalBill,
+    PolicyCard,
+    PolicyCitation,
+    PreAuthRequirement,
+    ReadinessScore,
+    RoomRentImpact,
     accounts,
     estimate_claim_payout,
     explain_clause_text,
     explain_policy_clause,
     extract_hospital_bill,
+    generate_claim_readiness_report,
     get_claim_relevant_clauses,
     get_policy_details,
     process_policy,
@@ -353,12 +362,186 @@ def tab_explain():
             st.caption(L("Connect a free AI key for real explanations.", "असली व्याख्या के लिए मुफ़्त एआई कुंजी जोड़ें।"))
 
 
+def tab_readiness():
+    """Claim Pre-Flight + Cashless Hospital Check: Claim Readiness Report."""
+    if not need_policy():
+        return
+    pid = current_policy()
+
+    st.markdown(f"### {L('Claim Readiness Report', 'क्लेम तत्परता रिपोर्ट')}")
+    st.caption(L("Check if your planned hospitalization is likely to be cashless and how much you may pay out of pocket.",
+                 "जाँचें कि आपकी नियोजित अस्पताल में भर्ती कैशलेस होने की संभावना है और आपको अपनी जेब से कितना भुगतान करना पड़ सकता है।"))
+
+    # -- Form for claim details -------------------------------------------
+    with st.form("claim_readiness_form"):
+        c1, c2 = st.columns(2)
+        patient = c1.text_input(L("Patient / member name", "रोगी / सदस्य का नाम"), key="crf_patient")
+        hospital = c2.text_input(L("Hospital name", "अस्पताल का नाम"), key="crf_hospital")
+        c3, c4 = st.columns(2)
+        city = c3.text_input(L("City", "शहर"), key="crf_city")
+        treatment = c4.text_input(L("Planned treatment / procedure", "योजनाबद्ध इलाज / प्रक्रिया"), key="crf_treatment")
+        c5, c6 = st.columns(2)
+        room_type = c5.text_input(L("Room type (e.g. single, deluxe)", "कमरे का प्रकार (जैसे सिंगल, डीलक्स)"), key="crf_room")
+        admit = c6.date_input(L("Expected admission date", "अपेक्षित भर्ती तिथि"), key="crf_admit")
+        bill_amt = st.number_input(L("Estimated hospital bill (₹)", "अनुमानित अस्पताल बिल (₹)"), min_value=0.0, value=0.0, key="crf_bill")
+        submitted = st.form_submit_button(L("Generate Claim Readiness Report", "क्लेम तत्परता रिपोर्ट बनाएँ"), type="primary", width="stretch")
+
+    if not submitted:
+        # Show sample questions
+        st.markdown(f"#### {L('Try asking:', 'आज़माएँ:')}")
+        cols = st.columns(3)
+        samples = [
+            ("Will my cataract surgery be cashless at Apollo Hospital Delhi?", "क्या मोतियाबिंद सर्जरी अपोलो अस्पताल दिल्ली में कैशलेस होगी?"),
+            ("What documents do I need before admission?", "भर्ती से पहले मुझे कौन से दस्तावेज़ चाहिए?"),
+            ("Why is my eligible amount lower than the hospital bill?", "मेरी पात्र राशि अस्पताल बिल से कम क्यों है?"),
+        ]
+        for i, (en, hi) in enumerate(samples):
+            if cols[i % 3].button(L(en, hi), key=f"crf_sample_{i}", width="stretch"):
+                st.session_state["crf_sample_q"] = L(en, hi)
+        if "crf_sample_q" in st.session_state:
+            st.info(st.session_state["crf_sample_q"])
+        return
+
+    # -- Generate report ---------------------------------------------------
+    with st.spinner(L("Generating your Claim Readiness Report…", "आपकी क्लेम तत्परता रिपोर्ट बनाई जा रही है…")):
+        report = run(generate_claim_readiness_report,
+                     pid,
+                     patient_name=patient or None,
+                     hospital_name=hospital or None,
+                     hospital_city=city or None,
+                     treatment_procedure=treatment or None,
+                     room_type=room_type or None,
+                     expected_admission_date=admit.isoformat() if admit else None,
+                     estimated_bill=bill_amt if bill_amt > 0 else None)
+
+    if not report:
+        return
+
+    # Save the report
+    try:
+        save_claim_readiness_report(report)
+    except Exception:
+        pass  # non-fatal
+
+    # -- Policy Card -------------------------------------------------------
+    pc = report.policy_card
+    st.markdown(f"#### {L('Policy Card', 'पॉलिसी कार्ड')}")
+    m = st.columns(4)
+    m[0].metric(L("Sum insured", "बीमित राशि"), inr(pc.sum_insured.value) if pc.sum_insured else "—")
+    m[1].metric(L("Room rent limit", "कमरे के किराए की सीमा"), inr(pc.room_rent_limit.value) if pc.room_rent_limit else "—")
+    m[2].metric(L("Co-pay", "सह-भुगतान"), f"{pc.copay_percentage:g}%" if pc.copay_percentage is not None else "—")
+    m[3].metric(L("Deductible", "कटौती"), pc.deductibles or "—")
+    if pc.insurer_name or pc.policy_name:
+        st.caption(f"{pc.insurer_name or ''} · {pc.policy_name or ''}")
+
+    # -- Readiness Score ---------------------------------------------------
+    rs = report.readiness_score
+    color_map = {"green": "ok", "amber": "warn", "red": "bad"}
+    kind = color_map.get(rs.color.value, "info")
+    st.markdown(f"#### {L('Claim Readiness Score', 'क्लेम तत्परता स्कोर')} &nbsp; {pill(f'{rs.score}/100 · {rs.label}', kind)}", unsafe_allow_html=True)
+    st.progress(rs.score / 100.0, text=f"{rs.label_hi} · {rs.score}%")
+    if rs.reasons:
+        with st.expander(L("Why this score?", "यह स्कोर क्यों?"), expanded=True):
+            for r, r_hi in zip(rs.reasons, rs.reasons_hi):
+                st.markdown(f"- {L(r, r_hi)}")
+
+    # -- Cashless Eligibility ---------------------------------------------
+    ce = report.cashless_eligibility
+    ce_kind = {"likely": "ok", "uncertain": "warn", "not_eligible": "bad"}.get(ce.status.value, "info")
+    st.markdown(f"#### {L('Cashless Eligibility', 'कैशलेस पात्रता')} &nbsp; {pill(ce.label, ce_kind)}", unsafe_allow_html=True)
+    if ce.reasons:
+        for r, r_hi in zip(ce.reasons, ce.reasons_hi):
+            st.markdown(f"- {L(r, r_hi)}")
+    st.caption(L("Pre-authorization: 48 hours before planned admission; 24 hours for emergency.",
+                 "प्री-ऑथराइज़ेशन: तय भर्ती से 48 घंटे पहले; इमरजेंसी में 24 घंटे के भीतर।"))
+
+    # -- Pre-auth ----------------------------------------------------------
+    pa = report.pre_auth
+    with st.expander(L("Pre-authorization requirements", "प्री-ऑथराइज़ेशन आवश्यकताएँ"), expanded=False):
+        st.markdown(f"**{pa.label}**")
+        for s, s_hi in zip(pa.steps, pa.steps_hi):
+            st.markdown(f"- {L(s, s_hi)}")
+        if pa.timeline:
+            st.caption(f"{L('Timeline', 'समय-सीमा')}: {L(pa.timeline, pa.timeline_hi)}")
+
+    # -- Room rent impact --------------------------------------------------
+    ri = report.room_rent_impact
+    st.markdown(f"#### {L('Room rent impact', 'कमरे के किराए का असर')}")
+    if ri.limit and ri.limit.value:
+        st.markdown(f"{L(ri.impact_description, ri.impact_description_hi)}")
+        if ri.proportionate_deduction_warning:
+            alert(L("A costlier room may reduce doctor, surgery and nursing payouts proportionately.",
+                    "महँगा कमरा लेने पर डॉक्टर, सर्जरी और नर्सिंग का भुगतान आनुपातिक रूप से घट सकता है।"))
+    else:
+        st.info(L(ri.impact_description, ri.impact_description_hi))
+
+    # -- Financial estimate ------------------------------------------------
+    fe = report.financial_estimate
+    st.markdown(f"#### {L('Estimated out-of-pocket exposure', 'अनुमानित जेब से खर्च')}")
+    m = st.columns(3)
+    m[0].metric(L("Estimated bill", "अनुमानित बिल"), inr(fe.bill_total))
+    m[1].metric(L("Insurer may pay", "बीमा कंपनी दे सकती है"), inr(fe.estimated_payout))
+    m[2].metric(L("You may pay", "आपको देना पड़ सकता है"), inr(fe.patient_pays))
+    if fe.out_of_pocket_range_low > 0:
+        st.caption(f"{L('Estimated range', 'अनुमानित दायरा')}: {inr(fe.out_of_pocket_range_low)} – {inr(fe.out_of_pocket_range_high)}")
+    st.caption(L("Informational estimate only — not an insurer approval.",
+                 "केवल सूचनात्मक अनुमान — बीमा कंपनी की मंज़ूरी नहीं।"))
+
+    # -- Waiting periods & exclusions --------------------------------------
+    if report.waiting_periods_relevant or report.exclusions_relevant:
+        with st.expander(L("Waiting periods & exclusions", "प्रतीक्षा अवधि और अपवर्जन"), expanded=False):
+            if report.waiting_periods_relevant:
+                st.markdown(f"**{L('Waiting periods', 'प्रतीक्षा अवधियाँ')}**")
+                for w in report.waiting_periods_relevant:
+                    st.markdown(f"- {w.condition}: {w.duration or f'{w.duration_days} days'} "
+                                f"(p.{w.source_page or '-'})")
+            if report.exclusions_relevant:
+                st.markdown(f"**{L('Exclusions', 'अपवर्जन')}**")
+                for e in report.exclusions_relevant:
+                    st.markdown(f"- {e.condition} (p.{e.source_page or '-'})")
+
+    # -- Documents ---------------------------------------------------------
+    st.markdown(f"#### {L('Required documents', 'ज़रूरी दस्तावेज़')}")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**{L('Cashless', 'कैशलेस')}**")
+        for d in report.required_documents_cashless:
+            st.checkbox(d, key=f"crf_doc_cashless_{hash(d)}")
+    with c2:
+        st.markdown(f"**{L('Reimbursement', 'प्रतिपूर्ति')}**")
+        for d in report.required_documents_reimbursement:
+            st.checkbox(d, key=f"crf_doc_reimb_{hash(d)}")
+
+    # -- Citations ---------------------------------------------------------
+    if report.citations:
+        with st.expander(L("Policy citations (source text)", "पॉलिसी उद्धरण (मूल पाठ)"), expanded=False):
+            for cit in report.citations:
+                head = f"📄 {L('Page', 'पेज')} {cit.page_number}" + (f" · {L('Clause', 'क्लॉज़')} {cit.clause_reference}" if cit.clause_reference else "")
+                st.markdown(f'<div class="ps-note"><b>{esc(head)}</b><br>{esc(cit.quoted_text)}</div>', unsafe_allow_html=True)
+
+    # -- Download ----------------------------------------------------------
+    import json
+    report_json = report.model_dump_json(indent=2)
+    st.download_button(
+        L("⬇️ Download Claim Readiness Report (JSON)", "⬇️ क्लेम तत्परता रिपोर्ट डाउनलोड करें (JSON)"),
+        data=report_json,
+        file_name=f"claim_readiness_{report.report_id}.json",
+        mime="application/json",
+        width="stretch",
+    )
+
+    st.divider()
+    st.caption(report.disclaimer)
+
+
 def render():
     page_header(L("Health insurance", "हेल्थ बीमा"),
                 L("Understand your cover, check claims before you pay, and decode the fine print.",
                   "अपना कवर समझें, भुगतान से पहले क्लेम जाँचें और बारीक शर्तें समझें।"))
-    tabs = st.tabs([L("📄 My policy", "📄 मेरी पॉलिसी"),
-                    L("🧾 Claim Pre-Flight", "🧾 क्लेम प्री-फ्लाइट"), L("🔍 Explain a clause", "🔍 क्लॉज़ समझें")])
-    for tab, fn in zip(tabs, (tab_policy, tab_claim, tab_explain)):
+    tabs = st.tabs([L("📄 My policy", "📄 मेरी पॉलिसी"), L("💬 Ask Saathi", "💬 साथी से पूछें"),
+                    L("🧾 Claim Pre-Flight", "🧾 क्लेम प्री-फ्लाइट"),
+                    L("🏥 Claim Readiness", "🏥 क्लेम तत्परता"),
+                    L("🔍 Explain a clause", "🔍 क्लॉज़ समझें")])
+    for tab, fn in zip(tabs, (tab_policy, tab_ask, tab_claim, tab_readiness, tab_explain)):
         with tab:
             fn()

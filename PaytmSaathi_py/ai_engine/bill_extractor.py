@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 
 from .exceptions import BillExtractionError, InvalidFileError, LLMProviderError, ValidationError
 from .llm_provider import LLMProvider, MockLLMProvider, get_llm_provider

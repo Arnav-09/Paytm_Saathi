@@ -114,7 +114,7 @@ def ocr_pdf_pages(path: Union[str, Path]) -> list[tuple[int, str]]:
     """Render each PDF page to an image and OCR it. Returns [(page_number, text)]."""
     if not ocr_available():
         raise OCRUnavailableError()
-    import fitz  # PyMuPDF
+    import pymupdf as fitz  # PyMuPDF
 
     try:
         doc = fitz.open(str(path))
